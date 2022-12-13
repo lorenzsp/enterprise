@@ -26,36 +26,39 @@ psrlist = None # define a list of pulsar name strings that can be used to filter
 datadir = './data'
 
 print(datadir)
+
+pickle_file = True
 ####################################################################################
 # Here it shows how to import the data, but I created a pickle object to import it quickly
+if pickle_file==False:
+    # for the entire pta
+    parfiles = sorted(glob.glob(datadir + '/par/*par'))
+    timfiles = sorted(glob.glob(datadir + '/tim/*tim'))
 
-# # for the entire pta
-# parfiles = sorted(glob.glob(datadir + '/par/*par'))
-# timfiles = sorted(glob.glob(datadir + '/tim/*tim'))
+    # filter
+    if psrlist is not None:
+        parfiles = [x for x in parfiles if x.split('/')[-1].split('.')[0] in psrlist]
+        timfiles = [x for x in timfiles if x.split('/')[-1].split('.')[0] in psrlist]
 
-# # filter
-# if psrlist is not None:
-#     parfiles = [x for x in parfiles if x.split('/')[-1].split('.')[0] in psrlist]
-#     timfiles = [x for x in timfiles if x.split('/')[-1].split('.')[0] in psrlist]
+    # Make sure you use the tempo2 parfile for J1713+0747!!
+    # ...filtering out the tempo parfile... 
+    parfiles = [x for x in parfiles if 'J1713+0747_NANOGrav_12yv3.gls.par' not in x]
 
-# # Make sure you use the tempo2 parfile for J1713+0747!!
-# # ...filtering out the tempo parfile... 
-# parfiles = [x for x in parfiles if 'J1713+0747_NANOGrav_12yv3.gls.par' not in x]
+    psrs = []
+    ephemeris = 'DE438'
+    for p, t in zip(parfiles, timfiles):
+        psr = Pulsar(p, t, ephem=ephemeris)
+        psrs.append(psr)
 
-# psrs = []
-# ephemeris = 'DE438'
-# for p, t in zip(parfiles, timfiles):
-#     psr = Pulsar(p, t, ephem=ephemeris)
-#     psrs.append(psr)
-
-# filename = "psrs_obj.pkl"
-# with open(filename, "wb") as output_file:
-#     cPickle.dump(psrs, output_file)
+    filename = "psrs_obj.pkl"
+    with open(filename, "wb") as output_file:
+        cPickle.dump(psrs, output_file)
 
 ####################################################################################
 # pickle object
-with open(datadir + "/psrs_obj.pkl", "rb") as input_file:
-    psrs = cPickle.load(input_file)
+else:
+    with open(datadir + "/psrs_obj.pkl", "rb") as input_file:
+        psrs = cPickle.load(input_file)
 
 ## Get parameter noise dictionary
 noise_ng12 = datadir + '/channelized_12p5yr_v3_full_noisedict.json'
@@ -220,7 +223,10 @@ class LogLikelihoodLocal(object):
                 except sl.LinAlgError:  # pragma: no cover
                     return -np.inf
 
+            tic = time.time()
             loglike += 0.5 * (np.dot(TNr, expval) - logdet_sigma - logdet_phi)
+            toc = time.time()
+            print("final computation", toc-tic)
         else:
             for TNr, TNT, pl in zip(TNrs, TNTs, phiinvs):
                 if TNr is None:
@@ -252,36 +258,46 @@ Warning: cannot find astropy, units support will not be available.
 ./data
 start timing
 [4889283.072539778, 4889034.559907954, 4889407.334923696, 4889648.942570506, 4889598.006753816, 4885220.336408644, 4889456.655002485, 4889341.636537235, 4889584.523676748, 4886285.761601724]
-the likelihood evaluation took:  2.0410800748009934 seconds, number of pulsars 45
-first part 0.18152904510498047
-prepare to cholesky 0.08527970314025879
-do cholesky 0.8251347541809082
-first part 0.19271397590637207
-prepare to cholesky 3.1948089599609375e-05
-do cholesky 0.8129470348358154
-first part 0.18581295013427734
-prepare to cholesky 2.8133392333984375e-05
-do cholesky 0.834956169128418
-first part 0.18744182586669922
-prepare to cholesky 2.7894973754882812e-05
-do cholesky 0.77046799659729
-first part 0.16963505744934082
+the likelihood evaluation took:  2.1442143232008677 seconds, number of pulsars 45
+first part 0.1783900260925293
+prepare to cholesky 0.07949709892272949
+do cholesky 0.8084447383880615
+final computation 2.4080276489257812e-05
+first part 0.1932361125946045
 prepare to cholesky 2.6226043701171875e-05
-do cholesky 0.8066768646240234
-first part 0.1694810390472412
-prepare to cholesky 4.100799560546875e-05
-do cholesky 0.7729082107543945
-first part 0.17634820938110352
+do cholesky 0.8444170951843262
+final computation 2.09808349609375e-05
+first part 0.18991684913635254
+prepare to cholesky 3.0040740966796875e-05
+do cholesky 0.8453202247619629
+final computation 3.3855438232421875e-05
+first part 0.1865549087524414
+prepare to cholesky 4.57763671875e-05
+do cholesky 0.8300662040710449
+final computation 1.811981201171875e-05
+first part 0.1863539218902588
+prepare to cholesky 2.5987625122070312e-05
+do cholesky 0.9051661491394043
+final computation 2.193450927734375e-05
+first part 0.19786882400512695
+prepare to cholesky 2.574920654296875e-05
+do cholesky 0.8559541702270508
+final computation 1.7881393432617188e-05
+first part 0.17209815979003906
+prepare to cholesky 2.4080276489257812e-05
+do cholesky 0.7788269519805908
+final computation 2.002716064453125e-05
+first part 0.17493605613708496
 prepare to cholesky 2.7179718017578125e-05
-do cholesky 0.8243558406829834
-first part 0.19411396980285645
+do cholesky 0.8226759433746338
+final computation 1.7881393432617188e-05
+first part 0.1686108112335205
+prepare to cholesky 2.574920654296875e-05
+do cholesky 0.8022723197937012
+final computation 1.9073486328125e-05
+first part 0.1789391040802002
 prepare to cholesky 2.5033950805664062e-05
-do cholesky 0.8101849555969238
-first part 0.17266297340393066
-prepare to cholesky 2.6941299438476562e-05
-do cholesky 0.7954177856445312
-first part 0.1702132225036621
-prepare to cholesky 2.6226043701171875e-05
-do cholesky 0.7710938453674316
+do cholesky 0.8208808898925781
+final computation 1.7881393432617188e-05
 [4889283.072539778, 4889034.559907954, 4889407.334923696, 4889648.942570506, 4889598.006753816, 4885220.336408644, 4889456.655002485, 4889341.636537235, 4889584.523676748, 4886285.761601724]
 """
