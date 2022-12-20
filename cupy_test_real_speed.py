@@ -118,7 +118,7 @@ gw = gp_signals.FourierBasisCommonGP(cpl, orf,
                                       components=30, Tspan=Tspan, name='gw')
 
 # to add solar system ephemeris modeling...
-bayesephem=False
+bayesephem=True
 if bayesephem:
     eph = deterministic_signals.PhysicalEphemerisSignal(use_epoch_toas=True)
 
@@ -160,7 +160,10 @@ print("the likelihood evaluation took: ",(toc-tic)/num, "seconds, number of puls
 # [4889283.07254719, 4889034.559904126, 4889407.334921482, 4889648.942572773, 4889598.006757148, 4885220.336421929, 4889456.655002594, 4889341.636542754, 4889584.523673296, 4886285.761601714]
 #######################################################################################
 # Here we break down the timing into different pieces
-breakpoint()
+# phi_0 = rn(psrs[0]).get_phi(x0[0]) + gw(psrs[0]).get_phi(x0[0])
+# B = tm(psrs[0]).get_phi(x0[0])
+# Mmat = tm(psrs[0]).get_basis(x0[0])
+# F = rn(psrs[0]).get_basis(x0[0])
 import cupy as xp
 
 import scipy.sparse as sps
@@ -181,7 +184,7 @@ class LogLikelihoodLocal(object):
     
     @simplememobyid
     def _block_TNr(self, TNrs):
-        return np.concatenate(TNrs)
+        return xp.concatenate((xp.asarray(el) for el in TNrs))
 
     def __call__(self, xs, phiinv_method="cliques"):
         # map parameter vector if needed
@@ -193,9 +196,16 @@ class LogLikelihoodLocal(object):
         # correlated signals
         tic = time.time()
         TNrs = self.pta.get_TNr(params)
+        toc = time.time()
+        print("TNt time", toc - tic)
         TNTs = self.pta.get_TNT(params)
+        tic = time.time()
+        toc = time.time()
+        print("TNT time", toc - tic)
+        tic = time.time()
         phiinvs = self.pta.get_phiinv(params, logdet=True, method=phiinv_method)
-        
+        toc = time.time()
+        print("phinv time", toc - tic)
         
         # get -0.5 * (rNr + logdet_N) piece of likelihood
         # the np.sum here is needed because each pulsar returns a 2-tuple
@@ -203,18 +213,19 @@ class LogLikelihoodLocal(object):
 
         # get extra prior/likelihoods
         loglike += sum(self.pta.get_logsignalprior(params))
-        toc = time.time()
-        print("first part", toc - tic)
+        
+        
 
         # red noise piece
         if self.pta._commonsignals:
             tic = time.time()
             phiinv, logdet_phi = phiinvs
 
-            TNT = self._block_TNT(TNTs)
-            TNr = xp.asarray(self._block_TNr(TNrs))
-            Mat = xp.asarray(TNT + phiinv)
+            TNT = xp.asarray(self._block_TNT(TNTs).toarray())
+            TNr = self._block_TNr(TNrs)
+            Mat = TNT + xp.asarray(phiinv)
             toc = time.time()
+            # print(TNT[10,10] ,TNr[10] )
             print("prepare to cholesky", toc-tic)
             if self.cholesky_sparse:
                 try:
