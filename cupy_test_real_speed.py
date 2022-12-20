@@ -197,7 +197,7 @@ class LogLikelihoodLocal(object):
         tic = time.time()
         TNrs = self.pta.get_TNr(params)
         toc = time.time()
-        print("TNt time", toc - tic)
+        print("TNr time", toc - tic)
         TNTs = self.pta.get_TNT(params)
         tic = time.time()
         toc = time.time()
