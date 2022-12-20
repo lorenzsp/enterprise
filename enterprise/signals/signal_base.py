@@ -964,7 +964,10 @@ def SignalCollection(metasignals):  # noqa: C901
                 return None
             Nvec = self.get_ndiag(params)
             res = self.get_detres(params)
+            # print(np.dot(T.T, res/Nvec) - Nvec.solve(res, left_array=T))
+            # return np.dot(T.T, res/Nvec)
             return Nvec.solve(res, left_array=T)
+            
 
         @cache_call(["basis_params", "white_params"])
         def get_TNT(self, params):
@@ -972,7 +975,11 @@ def SignalCollection(metasignals):  # noqa: C901
             if T is None:
                 return None
             Nvec = self.get_ndiag(params)
+            # print(np.dot(T.T, T/Nvec[:,None]) - Nvec.solve(T, left_array=T))
+            # return np.dot(T.T, T/Nvec[:,None])
             return Nvec.solve(T, left_array=T)
+            
+            
 
         @cache_call(["white_params", "delay_params"])
         def get_rNr_logdet(self, params):
