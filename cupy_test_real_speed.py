@@ -1,5 +1,12 @@
 # This script shows how to evaluate the likelihood of a real dataset. This is based on https://github.com/nanograv/12p5yr_stochastic_analysis/blob/master/notebooks/pta_gwb_analysis.ipynb
-import os, glob, json, pickle
+import os
+print("process", os.getpid() )
+dev = 7
+os.system(f"CUDA_VISIBLE_DEVICES={dev}")
+os.environ["CUDA_VISIBLE_DEVICES"] = f"{dev}"
+os.system("echo $CUDA_VISIBLE_DEVICES")
+
+import glob, json, pickle
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy.linalg as sl
@@ -143,15 +150,18 @@ np.random.seed(42)
 num = 10
 x0 = [np.hstack([p.sample() for p in pta.params]) for i in range(num)]
 
+pta.get_lnlikelihood(x0[0])
 # evaluate likelihood, I also print the values to check they are not infinite
 print("start timing")
 tic = time.perf_counter()
 print([pta.get_lnlikelihood(xx) for xx in x0])
 toc = time.perf_counter()
 print("the likelihood evaluation took: ",(toc-tic)/num, "seconds, number of pulsars", len(psrs))
-
+# [4889283.07254719, 4889034.559904126, 4889407.334921482, 4889648.942572773, 4889598.006757148, 4885220.336421929, 4889456.655002594, 4889341.636542754, 4889584.523673296, 4886285.761601714]
 #######################################################################################
 # Here we break down the timing into different pieces
+breakpoint()
+import cupy as xp
 
 import scipy.sparse as sps
 from enterprise.signals.signal_base import simplememobyid
@@ -168,7 +178,7 @@ class LogLikelihoodLocal(object):
             return sps.block_diag(TNTs, "csc")
         else:
             return sl.block_diag(*TNTs)
-
+    
     @simplememobyid
     def _block_TNr(self, TNrs):
         return np.concatenate(TNrs)
@@ -202,15 +212,20 @@ class LogLikelihoodLocal(object):
             phiinv, logdet_phi = phiinvs
 
             TNT = self._block_TNT(TNTs)
-            TNr = self._block_TNr(TNrs)
+            TNr = xp.asarray(self._block_TNr(TNrs))
+            Mat = xp.asarray(TNT + phiinv)
             toc = time.time()
             print("prepare to cholesky", toc-tic)
             if self.cholesky_sparse:
                 try:
                     tic = time.time()
-                    cf = cholesky(TNT + sps.csc_matrix(phiinv))  # cf(Sigma)
-                    expval = cf(TNr)
-                    logdet_sigma = cf.logdet()
+                    expval = xp.linalg.solve(Mat, TNr)
+                    logdet_sigma = xp.linalg.slogdet(Mat)[1]
+                    # del Mat
+                    # del TNT
+                    # del phiinv
+                    # del phiinvs
+
                     toc = time.time()
                     print("do cholesky", toc-tic)
                 except CholmodError:  # pragma: no cover
@@ -224,7 +239,7 @@ class LogLikelihoodLocal(object):
                     return -np.inf
 
             tic = time.time()
-            loglike += 0.5 * (np.dot(TNr, expval) - logdet_sigma - logdet_phi)
+            loglike += 0.5 * (float(xp.dot(TNr, expval))  - logdet_sigma - logdet_phi)
             toc = time.time()
             print("final computation", toc-tic)
         else:
@@ -250,7 +265,8 @@ class LogLikelihoodLocal(object):
 # check each part
 loglike = LogLikelihoodLocal(pta)
 print([loglike(xx) for xx in x0])
-
+# [4889283.07254719, 4889034.559904126, 4889407.334921482, 4889648.942572773, 4889598.006757148, 4885220.336421929, 4889456.655002594, 4889341.636542754, 4889584.523673296, 4886285.761601714]
+# [4889283.07254556, 4889034.55990401, 4889407.33493626, 4889648.94257218, 4889598.00675683, 4885220.33641609, 4889456.65500225, 4889341.6365405, 4889584.52366823, 4886285.76160171]
 #######################################################################################
 # my output on my local laptop
 """
