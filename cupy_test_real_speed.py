@@ -118,7 +118,7 @@ gw = gp_signals.FourierBasisCommonGP(cpl, orf,
                                       components=30, Tspan=Tspan, name='gw')
 
 # to add solar system ephemeris modeling...
-bayesephem=True
+bayesephem=False
 if bayesephem:
     eph = deterministic_signals.PhysicalEphemerisSignal(use_epoch_toas=True)
 
@@ -167,6 +167,7 @@ print("the likelihood evaluation took: ",(toc-tic)/num, "seconds, number of puls
 import cupy as xp
 
 import scipy.sparse as sps
+from cupyx.scipy.linalg import block_diag, solve_triangular
 from enterprise.signals.signal_base import simplememobyid
 from sksparse.cholmod import cholesky, CholmodError
 
@@ -221,8 +222,14 @@ class LogLikelihoodLocal(object):
             tic = time.time()
             phiinv, logdet_phi = phiinvs
 
-            TNT = xp.asarray(self._block_TNT(TNTs).toarray())
+            TNT = block_diag(*(xp.asarray(el) for el in TNTs))
+            toc = time.time()
+            print("prepare to cholesky TNT", toc-tic)
+            tic = time.time()
             TNr = self._block_TNr(TNrs)
+            toc = time.time()
+            print("prepare to cholesky TNr", toc-tic)
+            tic = time.time()
             Mat = TNT + xp.asarray(phiinv)
             toc = time.time()
             # print(TNT[10,10] ,TNr[10] )
