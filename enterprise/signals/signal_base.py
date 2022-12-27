@@ -338,8 +338,14 @@ class PTA(object):
     def get_TNT(self, params):
         return [signalcollection.get_TNT(params) for signalcollection in self._signalcollections]
 
-    def get_rNr_logdet(self, params):
-        return [signalcollection.get_rNr_logdet(params) for signalcollection in self._signalcollections]
+    def get_FLF(self, params):
+        return [signalcollection.get_FLF(params) for signalcollection in self._signalcollections]
+
+    def get_dtLdt(self, params):
+        return [signalcollection.get_dtLdt(params) for signalcollection in self._signalcollections]
+
+    def get_FLr(self, params):
+        return [signalcollection.get_FLr(params) for signalcollection in self._signalcollections]
 
     def get_residuals(self):
         return [signalcollection._residuals for signalcollection in self._signalcollections]
@@ -359,6 +365,9 @@ class PTA(object):
 
     def get_basis(self, params={}):
         return [signalcollection.get_basis(params) for signalcollection in self._signalcollections]
+
+    def get_rNr_logdet(self, params):
+        return [signalcollection.get_rNr_logdet(params) for signalcollection in self._signalcollections]
 
     @property
     def _lnlikelihood(self):
@@ -938,8 +947,35 @@ def SignalCollection(metasignals):  # noqa: C901
             for signal in self._signals:
                 if signal in self._idx:
                     Fmat[:, self._idx[signal]] = signal.get_basis(params)
-
+                    # print(signal.signal_name)
+                    # print(self._idx[signal])
             return Fmat
+
+        @cache_call("basis_params", limit=1)
+        def get_Mmat(self, params={}):
+            if self._Fmat is None:
+                return None
+
+            for signal in self._signals:
+                if signal in self._idx:
+                    if signal.signal_name=='linear timing model':
+                        return signal.get_basis(params)
+
+        @cache_call("basis_params", limit=1)
+        def get_Fmat(self, params={}):
+            if self._Fmat is None:
+                return None
+            Fmat = np.zeros_like(self._Fmat)
+
+            for signal in self._signals:
+                if signal in self._idx:
+                    if signal.signal_name!='linear timing model':
+                        Fmat[:, self._idx[signal]] = signal.get_basis(params)
+                    else:
+                        # print(signal.signal_name)
+                        mask = self._idx[signal]
+
+            return np.delete(Fmat,mask,axis=1)
 
         def get_phiinv(self, params):
             return self.get_phi(params).inv()
@@ -967,7 +1003,6 @@ def SignalCollection(metasignals):  # noqa: C901
             # print(np.dot(T.T, res/Nvec) - Nvec.solve(res, left_array=T))
             # return np.dot(T.T, res/Nvec)
             return Nvec.solve(res, left_array=T)
-            
 
         @cache_call(["basis_params", "white_params"])
         def get_TNT(self, params):
@@ -978,8 +1013,6 @@ def SignalCollection(metasignals):  # noqa: C901
             # print(np.dot(T.T, T/Nvec[:,None]) - Nvec.solve(T, left_array=T))
             # return np.dot(T.T, T/Nvec[:,None])
             return Nvec.solve(T, left_array=T)
-            
-            
 
         @cache_call(["white_params", "delay_params"])
         def get_rNr_logdet(self, params):
@@ -990,6 +1023,48 @@ def SignalCollection(metasignals):  # noqa: C901
         # TO DO: cache how?
         def get_logsignalprior(self, params):
             return sum(signal.get_logsignalprior(params) for signal in self._signals)
+
+        @cache_call(["basis_params","white_params", "delay_params"])
+        def get_dtLdt(self, params):
+            M = self.get_Mmat(params)
+            res = self.get_detres(params)
+            Nvec = self.get_ndiag(params)
+            if M is None:
+                return None
+            M_Nm1_r = Nvec.solve(res, left_array=M)
+            MX = Nvec.solve(M, left_array=M)
+            det_M_Nm1_M = np.linalg.slogdet(MX)
+            MY = M_Nm1_r @ np.linalg.solve(MX,M_Nm1_r)
+            return -MY, det_M_Nm1_M[1]
+
+        @cache_call(["basis_params", "white_params", "delay_params"])
+        def get_FLr(self, params):
+            M = self.get_Mmat(params)
+            F = self.get_Fmat(params)
+            res = self.get_detres(params)
+            Nvec = self.get_ndiag(params)
+            if M is None:
+                return None
+            MX = Nvec.solve(M, left_array=M)
+            M_Nm1_r = Nvec.solve(res, left_array=M)
+            M_Nm1_F = Nvec.solve(F, left_array=M)
+            MY = M_Nm1_F.T @ np.linalg.solve(MX,M_Nm1_r)
+            F_L_dt = Nvec.solve(res, left_array=F) - MY
+            return F_L_dt
+
+        @cache_call(["basis_params", "white_params"])
+        def get_FLF(self, params):
+            M = self.get_Mmat(params)
+            F = self.get_Fmat(params)
+            Nvec = self.get_ndiag(params)
+            if M is None:
+                return None
+            MX = Nvec.solve(M, left_array=M)
+            M_Nm1_F = Nvec.solve(F, left_array=M)
+            MY = M_Nm1_F.T @ np.linalg.solve(MX,M_Nm1_F)
+            FZ = Nvec.solve(F, left_array=F)
+            FLF = FZ - MY
+            return FLF
 
     return SignalCollection
 
