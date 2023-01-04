@@ -92,7 +92,7 @@ gamma_dm = parameter.Uniform(0, 7)
 
 # GW parameters (initialize with names here to use parameters in common across pulsars)
 log10_A_gw = parameter.Uniform(-18,-14)('log10_A_gw')
-gamma_gw = parameter.Constant(4.33)('gamma_gw')
+gamma_gw = parameter.Uniform(0,7)('gamma_gw')
 
 # white noise
 ef = white_signals.MeasurementNoise(efac=efac, selection=selection)
@@ -108,7 +108,7 @@ rn = gp_signals.FourierBasisGP(spectrum=pl, components=30, Tspan=Tspan)
 orf = utils.hd_orf()
 cpl = utils.powerlaw(log10_A=log10_A_gw, gamma=gamma_gw)
 gw = gp_signals.FourierBasisCommonGP(cpl, orf,
-                                      components=30, Tspan=Tspan, name='gw')
+                                      components=10, Tspan=Tspan, name='gw')
 
 
 # to add solar system ephemeris modeling...
@@ -190,11 +190,7 @@ class LogLikelihoodLocal(object):
 
         loglike = 0
 
-        # phiinvs will be a list or may be a big matrix if spatially
-        # correlated signals
         tic = time.time()
-        # TNrs = self.pta.get_FLr(params)
-        # TNTs = self.pta.get_FLF(params)
         flf_flr_rLr = self.pta.get_FLF_FLr_dtLdt_rNr(params)
         TNTs = [ell[0] for ell in flf_flr_rLr]
         TNrs = [ell[1] for ell in flf_flr_rLr]
@@ -202,51 +198,11 @@ class LogLikelihoodLocal(object):
         del flf_flr_rLr
         toc = time.time()
         print("TNrs TNTs", toc - tic)
-        # tic = time.time()
-        # ------------------------------------------------------------------------------------------
-        # # new get phi
-        # # uncorrelated matrix
-        # phis = [signalcollection.get_phi(params) for signalcollection in pta_gw._signalcollections]
-        # # # correlation between pulsars
-        # # Gamma = np.asarray([[utils.hd_orf(psrs[i].pos, psrs[j].pos) for i in range(len(psrs))] for j in range(len(psrs))])
-        # # Gamma[range(len(Gamma)),range(len(Gamma))] = 0.0
-        # Gamma = np.zeros((len(phis),len(phis)) )
-        # Gamma[np.triu_indices(len(phis),k=1)] += np.asarray([utils.hd_orf(psrs[i].pos, psrs[j].pos) for i in range(len(psrs)) for j in range(len(psrs)) if j>i])
-        # Gamma += Gamma.T
-        # # # base background spectrum
-        # rho_1psr = pta_gwonly.signals['J2317+1439_gw'].get_phi(params)
-        # base_phi = np.zeros_like(phis[0])
-        # base_phi[:len(rho_1psr)] = rho_1psr
-        # # toc = time.time()
-        # # print("phi", toc - tic)
-        # # # create off terms
-        # offPhi = sps.kron(Gamma, np.diag(base_phi),"csc")
-        # # # get final
-        # totPhi = offPhi + sps.block_diag([np.diag(pp) for pp in phis],"csc")
-
-        # # get a dictionary of slices locating each pulsar in Phi matrix
-        # slices = pta_gw._get_slices(phis)
-        # pta_gw._resetcliques(totPhi.shape[0])
-        # pta_gw._setpulsarcliques(slices, phis)
-
-        # # iterate over all common signal classes
-        # for csclass, csdict in pta_gw._commonsignals.items():
-        #     # first figure out which indices are used in this common signal
-        #     # and update the clique index
-        #     pta_gw._setcliques(slices, csdict)
-        
-        # assert np.all(totPhi.toarray()==pta_gw.get_phi(params))
-        # ------------------------------------------------------------------------------------------
-        
-        # tic = time.time()
+        tic = time.time()
         # this function makes sure that we can get directly a sparse matrix
-        phiinvs = pta_gw.get_phiinv_byfreq_cliques(params, logdet=True, chol=False)#, phi_input=totPhi, chol=True)
-        # toc = time.time()
-        # print("phi inv", toc - tic)
-        # get -0.5 * (rNr + logdet_N) piece of likelihood
-        # the np.sum here is needed because each pulsar returns a 2-tuple
-        # loglike += -0.5 * np.sum([ell for ell in pta.get_dtLdt(params)])
-        # loglike += -0.5 * np.sum([ell for ell in self.pta.get_rNr_logdet(params)])
+        phiinvs = pta_gw.get_phiinv_byfreq_cliques(params, logdet=True, chol=True)#, phi_input=totPhi, chol=True)
+        toc = time.time()
+        print("phi inv", toc - tic)
 
         # get extra prior/likelihoods
         loglike += sum(self.pta.get_logsignalprior(params))

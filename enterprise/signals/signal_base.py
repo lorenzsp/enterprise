@@ -656,19 +656,25 @@ class PTA(object):
 
             # iterate over all common signal classes
             for csclass, csdict in self._commonsignals.items():
+                # first figure out which indices are used in this common signal
+                # and update the clique index
+                if cliques:
+                    self._setcliques(slices, csdict)
                 
                 if chol:
                     list_sig = [el[0] for el in csdict.items()]
                     base_phi = np.zeros_like(phis[0])
-                    base_phi[:len(list_sig[0]._labels)] = csclass._prior(list_sig[0]._labels, params=params)
-                    Gamma = np.asarray([[csclass._orf(ls1._psrpos,ls2._psrpos) for ls1 in list_sig] for ls2 in list_sig])
-                    Gamma[range(len(Gamma)),range(len(Gamma))] = 0.0
+                    rho_1psr = csclass._prior(list_sig[0]._labels, params=params)
+                    base_phi[:len(rho_1psr)] += rho_1psr
+                    # Gamma = np.asarray([[csclass._orf(ls1._psrpos,ls2._psrpos) for ls1 in list_sig] for ls2 in list_sig])
+                    # Gamma[range(len(Gamma)),range(len(Gamma))] = 0.0
+                    Npsr = len(phis)
+                    Gamma = np.zeros((Npsr,Npsr) )
+                    Gamma[np.triu_indices(Npsr,k=1)] += np.asarray([csclass._orf(list_sig[i]._psrpos, list_sig[j]._psrpos) for i in range(Npsr) for j in range(Npsr) if j>i])
+                    Gamma += Gamma.T
+                    
                     Phi += sps.kron(Gamma, np.diag(base_phi),"csc")
                 else:
-                    # first figure out which indices are used in this common signal
-                    # and update the clique index
-                    if cliques:
-                        self._setcliques(slices, csdict)
                     # now iterate over all pairs of common signal instances
                     pairs = itertools.combinations(csdict.items(), 2)
 

@@ -1,10 +1,10 @@
 # This script shows how to evaluate the likelihood of a real dataset. This is based on https://github.com/nanograv/12p5yr_stochastic_analysis/blob/master/notebooks/pta_gwb_analysis.ipynb
 import os
 print("process", os.getpid() )
-dev = 7
-os.system(f"CUDA_VISIBLE_DEVICES={dev}")
-os.environ["CUDA_VISIBLE_DEVICES"] = f"{dev}"
-os.system("echo $CUDA_VISIBLE_DEVICES")
+# dev = 7
+# os.system(f"CUDA_VISIBLE_DEVICES={dev}")
+# os.environ["CUDA_VISIBLE_DEVICES"] = f"{dev}"
+# os.system("echo $CUDA_VISIBLE_DEVICES")
 
 import glob, json, pickle
 import matplotlib.pyplot as plt
@@ -42,38 +42,8 @@ datadir = './data'
 
 print(datadir)
 
-pickle_file = True
-####################################################################################
-# Here it shows how to import the data, but I created a pickle object to import it quickly
-if pickle_file==False:
-    # for the entire pta
-    parfiles = sorted(glob.glob(datadir + '/par/*par'))
-    timfiles = sorted(glob.glob(datadir + '/tim/*tim'))
-
-    # filter
-    if psrlist is not None:
-        parfiles = [x for x in parfiles if x.split('/')[-1].split('.')[0] in psrlist]
-        timfiles = [x for x in timfiles if x.split('/')[-1].split('.')[0] in psrlist]
-
-    # Make sure you use the tempo2 parfile for J1713+0747!!
-    # ...filtering out the tempo parfile... 
-    parfiles = [x for x in parfiles if 'J1713+0747_NANOGrav_12yv3.gls.par' not in x]
-
-    psrs = []
-    ephemeris = 'DE438'
-    for p, t in zip(parfiles, timfiles):
-        psr = Pulsar(p, t, ephem=ephemeris)
-        psrs.append(psr)
-
-    filename = "psrs_obj.pkl"
-    with open(filename, "wb") as output_file:
-        cPickle.dump(psrs, output_file)
-
-####################################################################################
-# pickle object
-else:
-    with open(datadir + "/psrs_obj.pkl", "rb") as input_file:
-        psrs = cPickle.load(input_file)
+with open(datadir + "/psrs_obj.pkl", "rb") as input_file:
+    psrs = cPickle.load(input_file)
 
 ## Get parameter noise dictionary
 noise_ng12 = datadir + '/channelized_12p5yr_v3_full_noisedict.json'
@@ -159,7 +129,6 @@ num = 10
 x0 = [np.hstack([p.sample() for p in pta.params]) for i in range(num)]
 
 
-
 # get parameters
 efacs, equads, ecorrs, log10_A, gamma = [], [], [], [], []
 lsig, llam = [], []
@@ -177,14 +146,19 @@ if isinstance(inc_kernel, bool):
     inc_kernel = [inc_kernel] * len(psrs)
 
 
-breakpoint()
 
+
+import scipy.sparse as sps
+from enterprise.signals.signal_base import simplememobyid
+from sksparse.cholmod import cholesky, CholmodError
 
 
 # correct value
 tflags = [sorted(list(np.unique(p.backend_flags))) for p in psrs]
 cfs, logdets, phis, Ts = [], [], [], []
+Ls = []
 for ii, (ik, psr, flags) in enumerate(zip(inc_kernel, psrs, tflags)):
+    print("pulsar",ii)
     nvec0 = np.zeros_like(psr.toas)
     for ct, flag in enumerate(flags):
         ind = psr.backend_flags == flag
@@ -208,6 +182,7 @@ for ii, (ik, psr, flags) in enumerate(zip(inc_kernel, psrs, tflags)):
         U[mask, netot : nn + netot] = Umats[ct]
         jvec[netot : nn + netot] = 10 ** (2 * ecorrs[ii][ct])
         netot += nn
+    
 
     # get covariance matrix
     cov = np.diag(nvec0) + np.dot(U * jvec[None, :], U.T)
@@ -216,11 +191,25 @@ for ii, (ik, psr, flags) in enumerate(zip(inc_kernel, psrs, tflags)):
     cfs.append(cf)
     logdets.append(logdet)
 
+
     F, f2 = utils.createfourierdesignmatrix_red(psr.toas, nmodes=20, Tspan=Tspan)
     Mmat = psr.Mmat.copy()
     norm = np.sqrt(np.sum(Mmat**2, axis=0))
     Mmat /= norm
     U2, avetoas = create_quant_matrix(psr.toas, dt=7 * 86400)
+
+    # compute L
+    Nm1_M = sl.cho_solve(cf, Mmat)
+    M_Nm1_M = Mmat.T @ Nm1_M
+    cf_temp = sl.cho_factor(M_Nm1_M)
+    M_Nm1_M_m1_M = sl.cho_solve(cf_temp, Mmat.T)
+    L2 = Mmat @ M_Nm1_M_m1_M
+    L1 = np.linalg.inv(cov)
+    L = L1 + L2
+    Ls.append(L)
+    breakpoint()
+    FLF = F.T @ L @ F
+    
     if ik:
         T = np.hstack((F, Mmat, U2))
     else:
