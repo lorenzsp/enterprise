@@ -110,6 +110,9 @@ cpl = utils.powerlaw(log10_A=log10_A_gw, gamma=gamma_gw)
 gw = gp_signals.FourierBasisCommonGP(cpl, orf,
                                       components=10, Tspan=Tspan, name='gw')
 
+mono = gp_signals.FourierBasisCommonGP(cpl, utils.monopole_orf(),
+                                      components=25, Tspan=Tspan, name='mono')
+
 
 # to add solar system ephemeris modeling...
 bayesephem=False
@@ -121,12 +124,12 @@ tm = gp_signals.TimingModel(use_svd=True)
 
 # full model
 if bayesephem:
-    s = ef + eq + ec + rn + tm + eph + gw
+    s = ef + eq + ec + rn + tm + eph + gw + mono
 else:
-    s = ef + eq + ec + rn + tm + gw
+    s = ef + eq + ec + rn + tm + gw + mono
 
-rn_s = ef + eq + ec + rn + gw
-gwonly = ef + eq + ec + gw
+rn_s = ef + eq + ec + rn + gw + mono
+gwonly = ef + eq + ec + gw + mono
 # intialize PTA (this cell will take a minute or two to run)
 models = []
 models_gw = []
@@ -218,18 +221,10 @@ class LogLikelihoodLocal(object):
             # print("prepare to cholesky", toc-tic)
 
             if self.cholesky_sparse:
-                # A = sps.block_diag([np.diag(1.0/pp) for pp in phis],"csc")
-                # B = offPhi.copy()
-                # S0 = - A @ B @ A
-                # totalS = A + S0
-                # for i in range(15):
-                #     S1 = - A @ B @ S0
-                #     totalS += S1.copy()
-                #     S0 = S1.copy()
                 try:
-                    # tic = time.time()
+                    tic = time.time()
                     
-                    Sigma = TNT + sps.csc_matrix(phiinv) #totalS#
+                    Sigma = TNT + sps.csc_matrix(phiinv)
                     # breakpoint()
                     # plt.figure(); plt.imshow((Sigma.toarray()!=0.0)*1.0);plt.colorbar(); plt.savefig("matrix.pdf");
                     
@@ -237,34 +232,8 @@ class LogLikelihoodLocal(object):
                     expval = cf(TNr)
                     logdet_sigma = cf.logdet()
                     
-                    # toc = time.time()
-                    # print("do cholesky", toc-tic)
-                    ######################################
-                    
-                    # # newTNT = TNT  + sps.block_diag([np.diag(pp) for pp in phis],"csc")
-                    # FLFm1_FLr = np.linalg.solve(TNTs,TNrs)
-                    # sum_FLr_FLFm1_FLr = np.sum([np.dot(fl, tnrs) for tnrs,fl in zip(TNrs,FLFm1_FLr)])
-                    
-                    # inv_FLF = np.linalg.inv(TNTs)
-                    # # u_s_v= [np.linalg.svd(tnt)for tnt in TNTs]
-                    # # inv_FLF = [np.dot(v.transpose(),np.dot(np.diag(s**-1),u.transpose())) for u,s,v in u_s_v]
-                    # # det_sum  = np.sum([np.log(s) for u,s,v in u_s_v])
-
-                    # newSigma = TNT @ totPhi @ TNT + TNT
-                    # newcf = cholesky(newSigma)
-                    # newFLr = self._block_TNr(TNr)
-                    # expval2 = newcf(newFLr)
-                    # logdet_sigma = newcf.logdet() + det_sum
-                    # sum_FLr_FLFm1_Sigmam1_FLFm1_FLr = TNr.T @ sps.linalg.factorized(TNT + TNT @ sps.linalg.inv(phiinv) @ TNT)(TNr)# np.dot(expval2,newFLr)
-                    # print(sum_FLr_FLFm1_Sigmam1_FLFm1_FLr)
-                    
-                    # # invnew = newcf.inv()
-                    # invTNT = self._block_TNT(inv_FLF)#sps.linalg.pinv(TNT)
-                    # # test1 = invTNT - sps.linalg.inv(TNT + TNT @ sps.linalg.inv(phiinv) @ TNT ) 
-                    # # test2 = totPhi - totPhi @ (invTNT + phiinv) @ totPhi
-                    # test1 - cf.inv() .toarray()
-                    # print(TNr.T @ invTNT @ TNr - TNr.T @ sps.linalg.inv(TNT + TNT @ sps.linalg.inv(phiinv) @ TNT ) @ TNr)
-
+                    toc = time.time()
+                    print("do cholesky", toc-tic)
 
                 except CholmodError:  # pragma: no cover
                     return -np.inf
