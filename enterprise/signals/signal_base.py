@@ -347,6 +347,9 @@ class PTA(object):
     def get_FLr(self, params):
         return [signalcollection.get_FLr(params) for signalcollection in self._signalcollections]
 
+    def get_FLF_FLr_dtLdt_rNr(self, params):
+        return [signalcollection.get_FLF_FLr_dtLdt_rNr(params) for signalcollection in self._signalcollections]
+
     def get_residuals(self):
         return [signalcollection._residuals for signalcollection in self._signalcollections]
 
@@ -515,8 +518,11 @@ class PTA(object):
         else:
             return [None if phivec is None else phivec.inv(logdet) for phivec in phivecs]
 
-    def get_phiinv_byfreq_cliques(self, params, logdet=False, cholesky=False):
-        phi = self.get_phi(params, cliques=True)
+    def get_phiinv_byfreq_cliques(self, params, logdet=False, chol=False, phi_input=None):
+        if phi_input is not None:
+            phi = phi_input
+        else:
+            phi = self.get_phi(params, cliques=True, chol=chol)
 
         if isinstance(phi, list):
             return [None if phivec is None else phivec.inv(logdet) for phivec in phi]
@@ -530,13 +536,13 @@ class PTA(object):
                 if np.any(idx):
                     idx2 = np.ix_(idx, idx)
 
-                    if cholesky:
-                        cf = sl.cho_factor(phi[idx2])
+                    if chol:
+                        cf = cholesky(phi[idx2])
 
                         if logdet:
-                            ld += 2.0 * np.sum(np.log(np.diag(cf[0])))
+                            ld += cf.logdet()
 
-                        phi[idx2] = sl.cho_solve(cf, np.identity(cf[0].shape[0]))
+                        phi[idx2] = cf.inv()
                     else:
                         phi2 = phi[idx2]
 
@@ -547,11 +553,11 @@ class PTA(object):
 
             # then do the pure diagonal terms
             idx = self._cliques == -1
+            if np.any(idx):
+                if logdet:
+                    ld += np.sum(np.log(phi[idx, idx]))
 
-            if logdet:
-                ld += np.sum(np.log(phi[idx, idx]))
-
-            phi[idx, idx] = 1.0 / phi[idx, idx]
+                phi[idx, idx] = 1.0 / phi[idx, idx]
 
             return (phi, ld) if logdet else phi
 
@@ -623,7 +629,7 @@ class PTA(object):
                             logger.info(slices)
                             raise
 
-    def get_phi(self, params, cliques=False):
+    def get_phi(self, params, cliques=False, chol=False):
         phis = [signalcollection.get_phi(params) for signalcollection in self._signalcollections]
 
         # if we found common signals, we'll return a big phivec matrix,
@@ -633,7 +639,10 @@ class PTA(object):
                 # if we have any dense matrices,
                 Phi = sl.block_diag(*[np.diag(phi) if phi.ndim == 1 else phi for phi in phis if phi is not None])
             else:
-                Phi = np.diag(np.concatenate([phi for phi in phis if phi is not None]))
+                if chol:
+                    Phi = sps.block_diag([np.diag(phi) for phi in phis if phi is not None],"csc")
+                else:
+                    Phi = np.diag(np.concatenate([phi for phi in phis if phi is not None]))
 
             # get a dictionary of slices locating each pulsar in Phi matrix
             slices = self._get_slices(phis)
@@ -647,26 +656,34 @@ class PTA(object):
 
             # iterate over all common signal classes
             for csclass, csdict in self._commonsignals.items():
-                # first figure out which indices are used in this common signal
-                # and update the clique index
-                if cliques:
-                    self._setcliques(slices, csdict)
+                
+                if chol:
+                    list_sig = [el[0] for el in csdict.items()]
+                    base_phi = np.zeros_like(phis[0])
+                    base_phi[:len(list_sig[0]._labels)] = csclass._prior(list_sig[0]._labels, params=params)
+                    Gamma = np.asarray([[csclass._orf(ls1._psrpos,ls2._psrpos) for ls1 in list_sig] for ls2 in list_sig])
+                    Gamma[range(len(Gamma)),range(len(Gamma))] = 0.0
+                    Phi += sps.kron(Gamma, np.diag(base_phi),"csc")
+                else:
+                    # first figure out which indices are used in this common signal
+                    # and update the clique index
+                    if cliques:
+                        self._setcliques(slices, csdict)
+                    # now iterate over all pairs of common signal instances
+                    pairs = itertools.combinations(csdict.items(), 2)
 
-                # now iterate over all pairs of common signal instances
-                pairs = itertools.combinations(csdict.items(), 2)
+                    for (cs1, csc1), (cs2, csc2) in pairs:
+                        crossdiag = csclass.get_phicross(cs1, cs2, params)
 
-                for (cs1, csc1), (cs2, csc2) in pairs:
-                    crossdiag = csclass.get_phicross(cs1, cs2, params)
+                        block1, idx1 = slices[csc1], csc1._idx[cs1]
+                        block2, idx2 = slices[csc2], csc2._idx[cs2]
 
-                    block1, idx1 = slices[csc1], csc1._idx[cs1]
-                    block2, idx2 = slices[csc2], csc2._idx[cs2]
-
-                    if crossdiag.ndim == 1:
-                        Phi[block1, block2][idx1, idx2] += crossdiag
-                        Phi[block2, block1][idx2, idx1] += crossdiag
-                    else:
-                        Phi[block1, block2][np.ix_(idx1, idx2)] += crossdiag
-                        Phi[block2, block1][np.ix_(idx2, idx1)] += crossdiag
+                        if crossdiag.ndim == 1:
+                            Phi[block1, block2][idx1, idx2] += crossdiag
+                            Phi[block2, block1][idx2, idx1] += crossdiag
+                        else:
+                            Phi[block1, block2][np.ix_(idx1, idx2)] += crossdiag
+                            Phi[block2, block1][np.ix_(idx2, idx1)] += crossdiag
 
             return Phi
         else:
@@ -1036,6 +1053,7 @@ def SignalCollection(metasignals):  # noqa: C901
             det_M_Nm1_M = np.linalg.slogdet(MX)
             MY = M_Nm1_r @ np.linalg.solve(MX,M_Nm1_r)
             return -MY, det_M_Nm1_M[1]
+        
 
         @cache_call(["basis_params", "white_params", "delay_params"])
         def get_FLr(self, params):
@@ -1065,6 +1083,26 @@ def SignalCollection(metasignals):  # noqa: C901
             FZ = Nvec.solve(F, left_array=F)
             FLF = FZ - MY
             return FLF
+
+        @cache_call(["basis_params", "white_params", "delay_params"])
+        def get_FLF_FLr_dtLdt_rNr(self, params):
+            M = self.get_Mmat(params)
+            F = self.get_Fmat(params)
+            res = self.get_detres(params)
+            Nvec = self.get_ndiag(params)
+            if M is None:
+                return None
+            MX = Nvec.solve(M, left_array=M)
+            M_Nm1_r = Nvec.solve(res, left_array=M)
+            M_Nm1_F = Nvec.solve(F, left_array=M)
+            F_L_dt = Nvec.solve(res, left_array=F) - M_Nm1_F.T @ np.linalg.solve(MX,M_Nm1_r)
+            det_M_Nm1_M = np.linalg.slogdet(MX)[1]
+            dt_L_dt = -M_Nm1_r @ np.linalg.solve(MX,M_Nm1_r)
+            rNr = Nvec.solve(res, left_array=res, logdet=True)
+            MY = M_Nm1_F.T @ np.linalg.solve(MX,M_Nm1_F)
+            FZ = Nvec.solve(F, left_array=F)
+            FLF = FZ - MY
+            return FLF, F_L_dt, dt_L_dt + det_M_Nm1_M + rNr[0] + rNr[1]
 
     return SignalCollection
 
