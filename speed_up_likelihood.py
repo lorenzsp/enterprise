@@ -108,10 +108,10 @@ rn = gp_signals.FourierBasisGP(spectrum=pl, components=30, Tspan=Tspan)
 orf = utils.hd_orf()
 cpl = utils.powerlaw(log10_A=log10_A_gw, gamma=gamma_gw)
 gw = gp_signals.FourierBasisCommonGP(cpl, orf,
-                                      components=10, Tspan=Tspan, name='gw')
+                                      components=30, Tspan=Tspan, name='gw')
 
 mono = gp_signals.FourierBasisCommonGP(cpl, utils.monopole_orf(),
-                                      components=25, Tspan=Tspan, name='mono')
+                                      components=15, Tspan=Tspan, name='mono')
 
 
 # to add solar system ephemeris modeling...
@@ -124,12 +124,16 @@ tm = gp_signals.TimingModel(use_svd=True)
 
 # full model
 if bayesephem:
-    s = ef + eq + ec + rn + tm + eph + gw + mono
+    s = ef + eq + ec + rn + tm + eph + gw # + mono
+    # additional
+    rn_s = ef + eq + ec + rn + eph + gw # + mono
+    gwonly = ef + eq + ec + eph + gw # + mono
 else:
-    s = ef + eq + ec + rn + tm + gw + mono
+    s = ef + eq + ec + rn + tm + gw # + mono
+    # additional
+    rn_s = ef + eq + ec + rn + gw # + mono
+    gwonly = ef + eq + ec + gw # + mono
 
-rn_s = ef + eq + ec + rn + gw + mono
-gwonly = ef + eq + ec + gw + mono
 # intialize PTA (this cell will take a minute or two to run)
 models = []
 models_gw = []
@@ -152,7 +156,7 @@ pta_gwonly.set_default_params(params)
 np.random.seed(42)
 
 # draw "num" possible parameters
-num = 10
+num = 3
 x0 = [np.hstack([p.sample() for p in pta.params]) for i in range(num)]
 
 # evaluate likelihood, I also print the values to check they are not infinite
@@ -204,30 +208,51 @@ class LogLikelihoodLocal(object):
         tic = time.time()
         # this function makes sure that we can get directly a sparse matrix
         phiinvs = pta_gw.get_phiinv_byfreq_cliques(params, logdet=True, chol=True)#, phi_input=totPhi, chol=True)
+        # phi_test = pta_gw.get_phi(params, cliques=True, chol=True)
+        # Nf = len(TNTs[0])
+        # Npsr = len(TNTs)
+        # out = np.linalg.inv([phi_test[slice(i, Npsr*Nf, Nf), slice(i, Npsr*Nf, Nf)].toarray() for i in range(Nf)])
+        # logdet_phi = np.sum( np.linalg.slogdet([phi_test[slice(i, Npsr*Nf, Nf), slice(i, Npsr*Nf, Nf)].toarray() for i in range(Nf)])[1] )
         toc = time.time()
         print("phi inv", toc - tic)
-
+        # newinv = sps.bmat([[ sps.diags(out[:,A,B],format="csc") for A in range(Npsr)]for B in range(Npsr)],format="csc")
+        
         # get extra prior/likelihoods
         loglike += sum(self.pta.get_logsignalprior(params))
 
         # red noise piece
         if self.pta._commonsignals:
-            # tic = time.time()
-            phiinv, logdet_phi = phiinvs
+            tic = time.time()
+            phiinv, logdet_phi = phiinvs #  newinv, np.sum(out_ld[1])#
 
             TNT = self._block_TNT(TNTs)
             TNr = self._block_TNr(TNrs)
-            # toc = time.time()
-            # print("prepare to cholesky", toc-tic)
+
+            # logdet_phi = 0.0
+            # for i in range(Nf):
+            #     # current_cf = cholesky(phi_test[slice(i, Npsr*Nf, Nf), slice(i, Npsr*Nf, Nf)])
+            #     # logdet_phi += current_cf.logdet()
+            #     TNT[slice(i, Npsr*Nf, Nf), slice(i, Npsr*Nf, Nf)] += sps.csc_matrix(out[i])
+
+            toc = time.time()
+            print("prepare to cholesky", toc-tic)
 
             if self.cholesky_sparse:
                 try:
+                    # breakpoint() 
                     tic = time.time()
+                    # ------------------------------------------
+                    # tmp_phi = pta_gw.get_phi(params, chol=True, cliques=True)
+                    # U,S,V =  sps.linalg.svds(tmp_phi,k=100)
+                    # tmp_Sigma = U.T @ TNT @ U+ np.diag(1/S)
+                    # right = U.T @ TNr
+                    # res = right @ np.linalg.solve(tmp_Sigma, right)
+                    # expval = tmp_cf(b_vec)
+                    # logdet_sigma = tmp_cf.logdet()
+                    # ------------------------------------------
                     
-                    Sigma = TNT + sps.csc_matrix(phiinv)
-                    # breakpoint()
-                    # plt.figure(); plt.imshow((Sigma.toarray()!=0.0)*1.0);plt.colorbar(); plt.savefig("matrix.pdf");
-                    
+                    # plt.figure(); plt.imshow((tmp_Sigma.toarray()!=0.0)*1.0);plt.colorbar(); plt.savefig("matrix.pdf");
+                    Sigma = TNT + phiinv
                     cf = cholesky(Sigma, ordering_method='natural', mode='supernodal') #,'natural','amd','colamd' use_long=False)  # cf(Sigma)
                     expval = cf(TNr)
                     logdet_sigma = cf.logdet()
