@@ -569,7 +569,7 @@ class PTA(object):
             return (phi, ld) if logdet else phi
 
 
-    def get_phiinv_byfreq_cliques_gpu(self, params, logdet=False, chol=False, phi_input=None):
+    def get_phiinv_byfreq_cliques_gpu(self, params, logdet=False, chol=False, phi_input=None,slicing=None):
         phi = self.get_phi_gpu(params, cliques=True, chol=False)
 
         if isinstance(phi, list):
@@ -577,27 +577,46 @@ class PTA(object):
         else:
             ld = 0
 
-            # first invert all the cliques
-            for clcount in range(self._clcount):
-                idx = self._cliques == clcount
+            
+            if slicing is not None:
 
+                ind_inphi = [xp.ix_(self._cliques == clcount, self._cliques == clcount)  for clcount in range(self._clcount) if np.any(self._cliques == clcount)]
+                Mat = xp.asarray([ phi[el] for el in ind_inphi ])
+                invMat = xp.linalg.inv(Mat)
+                for i,el in enumerate(ind_inphi):
+                    phi[el] = invMat[i].copy()
+                ld += xp.sum(xp.linalg.slogdet(Mat)[1])
+
+                # then do the pure diagonal terms
+                idx = self._cliques == -1
                 if np.any(idx):
-                    idx2 = xp.ix_(idx, idx)
-
-                    phi2 = phi[idx2]
-
                     if logdet:
-                        ld += xp.linalg.slogdet(phi2)[1]
+                        ld += xp.sum(xp.log(phi[idx, idx]))
 
-                    phi[idx2] = xp.linalg.inv(phi2)
+                    phi[idx, idx] = 1.0 / phi[idx, idx]
+            
+            # first invert all the cliques
+            else:
+                for clcount in range(self._clcount):
+                    idx = self._cliques == clcount
 
-            # then do the pure diagonal terms
-            idx = self._cliques == -1
-            if np.any(idx):
-                if logdet:
-                    ld += xp.sum(xp.log(phi[idx, idx]))
+                    if np.any(idx):
+                        idx2 = xp.ix_(idx, idx)
 
-                phi[idx, idx] = 1.0 / phi[idx, idx]
+                        phi2 = phi[idx2]
+
+                        if logdet:
+                            ld += xp.linalg.slogdet(phi2)[1]
+
+                        phi[idx2] = xp.linalg.inv(phi2)
+
+                # then do the pure diagonal terms
+                idx = self._cliques == -1
+                if np.any(idx):
+                    if logdet:
+                        ld += xp.sum(xp.log(phi[idx, idx]))
+
+                    phi[idx, idx] = 1.0 / phi[idx, idx]
 
             return (phi, ld) if logdet else phi
 

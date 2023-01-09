@@ -212,9 +212,13 @@ class LogLikelihoodLocal(object):
         toc = time.time()
         print("TNrs TNTs", toc - tic)
         tic = time.time()
-        phiinvs = pta_gw.get_phiinv_byfreq_cliques_gpu(params, logdet=True, chol=False)
+        Nf = len(TNTs[0])
+        Npsr = len(TNTs)
+        phiinvs = pta_gw.get_phiinv_byfreq_cliques_gpu(params, logdet=True, chol=False, slicing=1)
         toc = time.time()
         print("phi inv", toc - tic)
+        # breakpoint()
+        # phiinvs = pta_gw.get_phiinv_byfreq_cliques_gpu(params, logdet=True, chol=False, slicing=None)
 
         # get extra prior/likelihoods
         loglike += sum(self.pta.get_logsignalprior(params))
