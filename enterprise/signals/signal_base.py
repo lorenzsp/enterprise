@@ -673,7 +673,7 @@ class PTA(object):
                     Gamma[np.triu_indices(Npsr,k=1)] += np.asarray([csclass._orf(list_sig[i]._psrpos, list_sig[j]._psrpos) for i in range(Npsr) for j in range(Npsr) if j>i])
                     Gamma += Gamma.T
                     
-                    Phi += sps.kron(Gamma, np.diag(base_phi),"csc")
+                    Phi += sps.kron(Gamma, np.diag(base_phi),format="csc")
                 else:
                     # now iterate over all pairs of common signal instances
                     pairs = itertools.combinations(csdict.items(), 2)
@@ -1092,15 +1092,26 @@ def SignalCollection(metasignals):  # noqa: C901
 
         @cache_call(["basis_params", "white_params", "delay_params"])
         def get_FLF_FLr_dtLdt_rNr(self, params):
+            # import time
+            # tic = time.time()
             M = self.get_Mmat(params)
             F = self.get_Fmat(params)
             res = self.get_detres(params)
             Nvec = self.get_ndiag(params)
+            # print("M shape", M.shape)
+            # print("1",time.time()-tic)
+            # tic = time.time()
             if M is None:
                 return None
             MX = Nvec.solve(M, left_array=M)
+            # print("2",time.time()-tic)
+            # tic = time.time()
             M_Nm1_r = Nvec.solve(res, left_array=M)
+            # print("3",time.time()-tic)
+            # tic = time.time()
             M_Nm1_F = Nvec.solve(F, left_array=M)
+            # print("4",time.time()-tic)
+            # tic = time.time()
             F_L_dt = Nvec.solve(res, left_array=F) - M_Nm1_F.T @ np.linalg.solve(MX,M_Nm1_r)
             det_M_Nm1_M = np.linalg.slogdet(MX)[1]
             dt_L_dt = -M_Nm1_r @ np.linalg.solve(MX,M_Nm1_r)
@@ -1108,6 +1119,7 @@ def SignalCollection(metasignals):  # noqa: C901
             MY = M_Nm1_F.T @ np.linalg.solve(MX,M_Nm1_F)
             FZ = Nvec.solve(F, left_array=F)
             FLF = FZ - MY
+            # print("5",time.time()-tic)
             return FLF, F_L_dt, dt_L_dt + det_M_Nm1_M + rNr[0] + rNr[1]
 
     return SignalCollection
