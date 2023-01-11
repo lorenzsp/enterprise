@@ -107,8 +107,7 @@ rn = gp_signals.FourierBasisGP(spectrum=pl, components=30, Tspan=Tspan)
 # spatial correlations are covered in the hypermodel context later
 orf = utils.hd_orf()
 cpl = utils.powerlaw(log10_A=log10_A_gw, gamma=gamma_gw)
-gw = gp_signals.FourierBasisCommonGP(cpl, orf,
-                                      components=30, Tspan=Tspan, name='gw')
+gw = gp_signals.FourierBasisCommonGP(cpl, orf, components=30, Tspan=Tspan, name='gw')#gp_signals.FourierBasisGP(spectrum=pl, components=30, Tspan=Tspan, name='gw')#
 
 mono = gp_signals.FourierBasisCommonGP(cpl, utils.monopole_orf(),
                                       components=15, Tspan=Tspan, name='mono')
@@ -277,22 +276,33 @@ class LogLikelihoodLocal(object):
             # toc = time.time()
             # print("final computation", toc-tic)
         else:
-            for TNr, TNT, pl in zip(TNrs, TNTs, phiinvs):
-                if TNr is None:
-                    continue
+            list_TNr = np.asarray([TNr for TNr, TNT, pl in zip(TNrs, TNTs, phiinvs) if TNr is not None])
+            list_TNT = [TNT + np.diag(pl[0]) if pl[0].ndim == 1 else TNr + pl[0] for TNr, TNT, pl in zip(TNrs, TNTs, phiinvs) if TNr is not None]
+            logdet_phi = np.sum([pl[1] for TNr, TNT, pl in zip(TNrs, TNTs, phiinvs) if TNr is not None])
+            try:
+                list_cf = np.linalg.cholesky(list_TNT)
+            except np.LinAlgError:  # pragma: no cover
+                return -np.inf
+            list_expval = np.asarray([sl.cho_solve((cf,1), tnr) for cf,tnr in zip(list_cf,list_TNr)])
+            logdet_sigma = np.sum([np.sum(2*np.log(np.diag(cf))) for cf in list_cf])
+            loglike += 0.5 * (np.tensordot(list_TNr, list_expval) - logdet_sigma - logdet_phi)
 
-                phiinv, logdet_phi = pl
-                Sigma = TNT + (np.diag(phiinv) if phiinv.ndim == 1 else phiinv)
+            # for TNr, TNT, pl in zip(TNrs, TNTs, phiinvs):
+            #     if TNr is None:
+            #         continue
 
-                try:
-                    cf = sl.cho_factor(Sigma)
-                    expval = sl.cho_solve(cf, TNr)
-                except sl.LinAlgError:  # pragma: no cover
-                    return -np.inf
+            #     phiinv, logdet_phi = pl
+            #     Sigma = TNT + (np.diag(phiinv) if phiinv.ndim == 1 else phiinv)
 
-                logdet_sigma = np.sum(2 * np.log(np.diag(cf[0])))
+            #     try:
+            #         cf = sl.cho_factor(Sigma)
+            #         expval = sl.cho_solve(cf, TNr)
+            #     except sl.LinAlgError:  # pragma: no cover
+            #         return -np.inf
 
-                loglike += 0.5 * (np.dot(TNr, expval) - logdet_sigma - logdet_phi)
+            #     logdet_sigma = np.sum(2 * np.log(np.diag(cf[0])))
+
+            #     loglike += 0.5 * (np.dot(TNr, expval) - logdet_sigma - logdet_phi)
 
         return loglike
 
