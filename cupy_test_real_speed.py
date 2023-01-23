@@ -1,7 +1,7 @@
 # This script shows how to evaluate the likelihood of a real dataset. This is based on https://github.com/nanograv/12p5yr_stochastic_analysis/blob/master/notebooks/pta_gwb_analysis.ipynb
 import os
 print("process", os.getpid() )
-dev = 7
+dev = 3
 os.system(f"CUDA_VISIBLE_DEVICES={dev}")
 os.environ["CUDA_VISIBLE_DEVICES"] = f"{dev}"
 os.system("echo $CUDA_VISIBLE_DEVICES")
@@ -170,6 +170,8 @@ import scipy.sparse as sps
 from cupyx.scipy.linalg import block_diag, solve_triangular
 from enterprise.signals.signal_base import simplememobyid
 from sksparse.cholmod import cholesky, CholmodError
+import jax.numpy as jnp
+import jax.scipy.linalg as jsl
 
 class LogLikelihoodLocal(object):
     def __init__(self, pta, cholesky_sparse=True):
@@ -185,7 +187,7 @@ class LogLikelihoodLocal(object):
     
     @simplememobyid
     def _block_TNr(self, TNrs):
-        return xp.concatenate((xp.asarray(el) for el in TNrs))
+        return jnp.concatenate(TNrs)
 
     def __call__(self, xs, phiinv_method="cliques"):
         # map parameter vector if needed
@@ -222,7 +224,7 @@ class LogLikelihoodLocal(object):
             tic = time.time()
             phiinv, logdet_phi = phiinvs
 
-            TNT = block_diag(*(xp.asarray(el) for el in TNTs))
+            TNT = jsl.block_diag(*(el for el in TNTs))
             toc = time.time()
             print("prepare to cholesky TNT", toc-tic)
             tic = time.time()
@@ -230,15 +232,21 @@ class LogLikelihoodLocal(object):
             toc = time.time()
             print("prepare to cholesky TNr", toc-tic)
             tic = time.time()
-            Mat = TNT + xp.asarray(phiinv)
+            Mat = TNT + jnp.asarray(phiinv) 
             toc = time.time()
             # print(TNT[10,10] ,TNr[10] )
             print("prepare to cholesky", toc-tic)
             if self.cholesky_sparse:
                 try:
                     tic = time.time()
-                    expval = xp.linalg.solve(Mat, TNr)
-                    logdet_sigma = xp.linalg.slogdet(Mat)[1]
+                    multiM = [Mat for _ in range(10)]
+                    multiTNr = [TNr for _ in range(10)]
+                    u = jsl.cho_factor(multiM ) 
+                    texp = jsl.cho_solve(u,multiTNr)
+                    final = (texp*multiTNr).sum(axis=(1,2))
+                    # expval = xp.linalg.solve(Mat, TNr)
+                    
+                    logdet_sigma = jnp.sum(2.0*jnp.log(jnp.diagonal(jnp.asarray(u),axis1=1, axis2=2)), axis=1) #xp.linalg.slogdet(Mat)[1]
                     # del Mat
                     # del TNT
                     # del phiinv
@@ -246,6 +254,7 @@ class LogLikelihoodLocal(object):
 
                     toc = time.time()
                     print("do cholesky", toc-tic)
+                    
                 except CholmodError:  # pragma: no cover
                     return -np.inf
             else:
@@ -257,7 +266,7 @@ class LogLikelihoodLocal(object):
                     return -np.inf
 
             tic = time.time()
-            loglike += 0.5 * (float(xp.dot(TNr, expval))  - logdet_sigma - logdet_phi)
+            loglike += 0.5 * float( final[0]  - logdet_sigma[0] - logdet_phi)
             toc = time.time()
             print("final computation", toc-tic)
         else:
