@@ -3,6 +3,14 @@
 Defines the signal base classes and metaclasses. All signals will then be
 derived from these base classes.
 """
+# GPU addition
+try:
+    from cupyx.scipy.linalg import block_diag, solve_triangular
+    import cupy as xp
+    import torch
+except:
+    import numpy as xp
+
 import collections
 
 try:
@@ -177,22 +185,33 @@ def LogLikelihoodDenseCholesky(pta):
 
 
 class LogLikelihood(object):
-    def __init__(self, pta, cholesky_sparse=True):
+    def __init__(self, pta, cholesky_sparse=True, use_gpu=False):
         self.pta = pta
         self.cholesky_sparse = cholesky_sparse
+        if cholesky_sparse:
+            self.use_gpu = use_gpu
+        else:
+            self.use_gpu = False
 
     @simplememobyid
     def _block_TNT(self, TNTs):
-        if self.cholesky_sparse:
+        if self.use_gpu:
+            return block_diag(*(xp.asarray(el,dtype=float) for el in TNTs))
+        elif self.cholesky_sparse:
             return sps.block_diag(TNTs, "csc")
         else:
             return sl.block_diag(*TNTs)
-
+    
     @simplememobyid
     def _block_TNr(self, TNrs):
-        return np.concatenate(TNrs)
+        if self.use_gpu:
+            return xp.concatenate((xp.asarray(el,dtype=float) for el in TNrs))
+        else:
+            return np.concatenate(TNrs)
 
     def __call__(self, xs, phiinv_method="cliques"):
+        if phiinv_method!="cliques":
+            self.use_gpu=False
         # map parameter vector if needed
         params = xs if isinstance(xs, dict) else self.pta.map_params(xs)
 
@@ -217,12 +236,26 @@ class LogLikelihood(object):
 
             TNT = self._block_TNT(TNTs)
             TNr = self._block_TNr(TNrs)
+            # print (1-TNT.toarray()[TNT.toarray()!=0.0] /(TNT.toarray().T)[TNT.toarray()!=0.0] )
 
             if self.cholesky_sparse:
                 try:
-                    cf = cholesky(TNT + sps.csc_matrix(phiinv))  # cf(Sigma)
-                    expval = cf(TNr)
-                    logdet_sigma = cf.logdet()
+                    if self.use_gpu:
+                        Mat = TNT + xp.asarray(phiinv,dtype=float)
+                        # print (np.all(Mat==Mat.T))
+                        # print (Mat-Mat.T)
+                        # scipy.linalg.solve_triangular
+                        L = xp.linalg.cholesky(Mat)
+                        expval = solve_triangular(L.T,solve_triangular(L,TNr,lower=True))
+                        logdet_sigma = 2*xp.sum( xp.log(xp.diag(L)))
+                        # expval = xp.linalg.solve(Mat, TNr)
+                        # logdet_sigma = xp.linalg.slogdet(Mat)[1]
+                    else:
+                        Mat = TNT + sps.csc_matrix(phiinv)
+                        # assert (np.all(Mat.toarray() ==Mat.toarray().T))
+                        cf = cholesky(Mat, ordering_method='natural', mode='supernodal')
+                        expval = cf(TNr)
+                        logdet_sigma = cf.logdet()
                 except CholmodError:  # pragma: no cover
                     return -np.inf
             else:
@@ -232,8 +265,12 @@ class LogLikelihood(object):
                     logdet_sigma = 2 * np.sum(np.log(np.diag(cf[0])))
                 except sl.LinAlgError:  # pragma: no cover
                     return -np.inf
+            
+            if self.use_gpu:
+                loglike += 0.5 * (float(xp.dot(TNr, expval)  - logdet_sigma) - logdet_phi)
+            else:
+                loglike += 0.5 * (np.dot(TNr, expval) - logdet_sigma - logdet_phi)
 
-            loglike += 0.5 * (np.dot(TNr, expval) - logdet_sigma - logdet_phi)
         else:
             for TNr, TNT, pl in zip(TNrs, TNTs, phiinvs):
                 if TNr is None:
@@ -253,6 +290,111 @@ class LogLikelihood(object):
                 loglike += 0.5 * (np.dot(TNr, expval) - logdet_sigma - logdet_phi)
 
         return loglike
+
+
+class VectorizedLogLikelihood(object):
+    def __init__(self, pta, cholesky_sparse=True, use_gpu=False):
+        self.pta = pta
+        self.cholesky_sparse = cholesky_sparse
+        if cholesky_sparse:
+            self.use_gpu = use_gpu
+        else:
+            self.use_gpu = False
+
+    @simplememobyid
+    def _block_TNT(self, TNTs):
+        if self.use_gpu:
+            return torch.block_diag(*(torch.from_numpy(el) for el in TNTs))#block_diag(*(xp.asarray(el) for el in TNTs))
+        elif self.cholesky_sparse:
+            return sps.block_diag(TNTs, "csc")
+        else:
+            return sl.block_diag(*TNTs)
+    
+    @simplememobyid
+    def _block_TNr(self, TNrs):
+        if self.use_gpu:
+            return torch.cat(tuple(torch.from_numpy(el) for el in TNrs))#xp.concatenate((xp.asarray(el) for el in TNrs))
+        else:
+            return np.concatenate(TNrs)
+
+    def __call__(self, list_xs, phiinv_method="cliques"):
+        if phiinv_method!="cliques":
+            self.use_gpu=False
+        
+        # map parameter vector if needed
+        params = [xs if isinstance(xs, dict) else self.pta.map_params(xs) for xs in list_xs]
+
+        loglike = 0
+
+        # phiinvs will be a list or may be a big matrix if spatially
+        # correlated signals
+        TNrs = [self.pta.get_TNr(pp) for pp in params]
+        TNTs = [self.pta.get_TNT(pp) for pp in params]
+        phiinvs = [self.pta.get_phiinv(pp, logdet=True, method=phiinv_method) for pp in params]
+        logdet_phi = np.asarray([el[1] for el in phiinvs ])
+
+        # get -0.5 * (rNr + logdet_N) piece of likelihood
+        # the np.sum here is needed because each pulsar returns a 2-tuple
+        loglike1 = np.asarray([-0.5 * np.sum([ell for ell in self.pta.get_rNr_logdet(pp)]) for pp in params]) - 0.5 * logdet_phi
+
+        # get extra prior/likelihoods
+        loglike1 += np.asarray([sum(self.pta.get_logsignalprior(pp)) for pp in params])
+
+        # red noise piece
+        if self.pta._commonsignals:
+            # phiinv, logdet_phi = phiinvs
+            TNT = torch.stack(tuple(self._block_TNT(tnt)+torch.from_numpy(ph[0]) for tnt,ph in zip(TNTs,phiinvs)))
+            TNr = torch.stack(tuple(self._block_TNr(tnr) for tnr  in TNrs))
+            
+
+            if self.cholesky_sparse:
+                try:
+                    if self.use_gpu:
+                        u = torch.linalg.cholesky(TNT)
+                        expval = torch.cholesky_solve(TNr[...,None], u)
+                        logdet_sigma = torch.stack(tuple(torch.sum(2*torch.log(torch.diag(el))) for el in u))
+                    else:
+                        cf = cholesky(TNT + sps.csc_matrix(phiinv), ordering_method='natural', mode='supernodal')
+                        expval = cf(TNr)
+                        logdet_sigma = cf.logdet()
+                except CholmodError:  # pragma: no cover
+                    return -np.inf
+            else:
+                try:
+                    cf = sl.cho_factor(TNT + phiinv)  # cf(Sigma)
+                    expval = sl.cho_solve(cf, TNr)
+                    logdet_sigma = 2 * np.sum(np.log(np.diag(cf[0])))
+                except sl.LinAlgError:  # pragma: no cover
+                    return -np.inf
+            
+            if self.use_gpu:
+                
+                loglike3 = 0.5 * ( torch.sum(TNr* expval[...,0],axis=1) - logdet_sigma)#-0.5 logdet_phi #(float(xp.dot(TNr, expval)  - logdet_sigma) - logdet_phi)
+                loglike = loglike3.numpy() + loglike1
+            else:
+                loglike += 0.5 * (np.dot(TNr, expval) - logdet_sigma - logdet_phi)
+
+        else:
+            for TNr, TNT, pl in zip(TNrs, TNTs, phiinvs):
+                if TNr is None:
+                    continue
+
+                phiinv, logdet_phi = pl
+                Sigma = TNT + (np.diag(phiinv) if phiinv.ndim == 1 else phiinv)
+
+                try:
+                    cf = sl.cho_factor(Sigma)
+                    expval = sl.cho_solve(cf, TNr)
+                except sl.LinAlgError:  # pragma: no cover
+                    return -np.inf
+
+                logdet_sigma = np.sum(2 * np.log(np.diag(cf[0])))
+
+                loglike += 0.5 * (np.dot(TNr, expval) - logdet_sigma - logdet_phi)
+
+        return loglike
+
+
 
 
 class PTA(object):
@@ -338,17 +480,8 @@ class PTA(object):
     def get_TNT(self, params):
         return [signalcollection.get_TNT(params) for signalcollection in self._signalcollections]
 
-    def get_FLF(self, params):
-        return [signalcollection.get_FLF(params) for signalcollection in self._signalcollections]
-
-    def get_dtLdt(self, params):
-        return [signalcollection.get_dtLdt(params) for signalcollection in self._signalcollections]
-
-    def get_FLr(self, params):
-        return [signalcollection.get_FLr(params) for signalcollection in self._signalcollections]
-
-    def get_FLF_FLr_dtLdt_rNr(self, params):
-        return [signalcollection.get_FLF_FLr_dtLdt_rNr(params) for signalcollection in self._signalcollections]
+    def get_rNr_logdet(self, params):
+        return [signalcollection.get_rNr_logdet(params) for signalcollection in self._signalcollections]
 
     def get_residuals(self):
         return [signalcollection._residuals for signalcollection in self._signalcollections]
@@ -368,9 +501,6 @@ class PTA(object):
 
     def get_basis(self, params={}):
         return [signalcollection.get_basis(params) for signalcollection in self._signalcollections]
-
-    def get_rNr_logdet(self, params):
-        return [signalcollection.get_rNr_logdet(params) for signalcollection in self._signalcollections]
 
     @property
     def _lnlikelihood(self):
@@ -518,11 +648,8 @@ class PTA(object):
         else:
             return [None if phivec is None else phivec.inv(logdet) for phivec in phivecs]
 
-    def get_phiinv_byfreq_cliques(self, params, logdet=False, chol=False, phi_input=None):
-        if phi_input is not None:
-            phi = phi_input
-        else:
-            phi = self.get_phi(params, cliques=True, chol=chol)
+    def get_phiinv_byfreq_cliques(self, params, logdet=False, cholesky=False):
+        phi = self.get_phi(params, cliques=True)
 
         if isinstance(phi, list):
             return [None if phivec is None else phivec.inv(logdet) for phivec in phi]
@@ -536,13 +663,13 @@ class PTA(object):
                 if np.any(idx):
                     idx2 = np.ix_(idx, idx)
 
-                    if chol:
-                        cf = cholesky(phi[idx2])
+                    if cholesky:
+                        cf = sl.cho_factor(phi[idx2])
 
                         if logdet:
-                            ld += cf.logdet()
+                            ld += 2.0 * np.sum(np.log(np.diag(cf[0])))
 
-                        phi[idx2] = cf.inv()
+                        phi[idx2] = sl.cho_solve(cf, np.identity(cf[0].shape[0]))
                     else:
                         phi2 = phi[idx2]
 
@@ -553,11 +680,11 @@ class PTA(object):
 
             # then do the pure diagonal terms
             idx = self._cliques == -1
-            if np.any(idx):
-                if logdet:
-                    ld += np.sum(np.log(phi[idx, idx]))
 
-                phi[idx, idx] = 1.0 / phi[idx, idx]
+            if logdet:
+                ld += np.sum(np.log(phi[idx, idx]))
+
+            phi[idx, idx] = 1.0 / phi[idx, idx]
 
             return (phi, ld) if logdet else phi
 
@@ -629,7 +756,7 @@ class PTA(object):
                             logger.info(slices)
                             raise
 
-    def get_phi(self, params, cliques=False, chol=False):
+    def get_phi(self, params, cliques=False):
         phis = [signalcollection.get_phi(params) for signalcollection in self._signalcollections]
 
         # if we found common signals, we'll return a big phivec matrix,
@@ -639,10 +766,7 @@ class PTA(object):
                 # if we have any dense matrices,
                 Phi = sl.block_diag(*[np.diag(phi) if phi.ndim == 1 else phi for phi in phis if phi is not None])
             else:
-                if chol:
-                    Phi = sps.block_diag([np.diag(phi) for phi in phis if phi is not None],"csc")
-                else:
-                    Phi = np.diag(np.concatenate([phi for phi in phis if phi is not None]))
+                Phi = np.diag(np.concatenate([phi for phi in phis if phi is not None]))
 
             # get a dictionary of slices locating each pulsar in Phi matrix
             slices = self._get_slices(phis)
@@ -656,34 +780,26 @@ class PTA(object):
 
             # iterate over all common signal classes
             for csclass, csdict in self._commonsignals.items():
-                
-                if chol:
-                    list_sig = [el[0] for el in csdict.items()]
-                    base_phi = np.zeros_like(phis[0])
-                    base_phi[:len(list_sig[0]._labels)] = csclass._prior(list_sig[0]._labels, params=params)
-                    Gamma = np.asarray([[csclass._orf(ls1._psrpos,ls2._psrpos) for ls1 in list_sig] for ls2 in list_sig])
-                    Gamma[range(len(Gamma)),range(len(Gamma))] = 0.0
-                    Phi += sps.kron(Gamma, np.diag(base_phi),"csc")
-                else:
-                    # first figure out which indices are used in this common signal
-                    # and update the clique index
-                    if cliques:
-                        self._setcliques(slices, csdict)
-                    # now iterate over all pairs of common signal instances
-                    pairs = itertools.combinations(csdict.items(), 2)
+                # first figure out which indices are used in this common signal
+                # and update the clique index
+                if cliques:
+                    self._setcliques(slices, csdict)
 
-                    for (cs1, csc1), (cs2, csc2) in pairs:
-                        crossdiag = csclass.get_phicross(cs1, cs2, params)
+                # now iterate over all pairs of common signal instances
+                pairs = itertools.combinations(csdict.items(), 2)
 
-                        block1, idx1 = slices[csc1], csc1._idx[cs1]
-                        block2, idx2 = slices[csc2], csc2._idx[cs2]
+                for (cs1, csc1), (cs2, csc2) in pairs:
+                    crossdiag = csclass.get_phicross(cs1, cs2, params)
 
-                        if crossdiag.ndim == 1:
-                            Phi[block1, block2][idx1, idx2] += crossdiag
-                            Phi[block2, block1][idx2, idx1] += crossdiag
-                        else:
-                            Phi[block1, block2][np.ix_(idx1, idx2)] += crossdiag
-                            Phi[block2, block1][np.ix_(idx2, idx1)] += crossdiag
+                    block1, idx1 = slices[csc1], csc1._idx[cs1]
+                    block2, idx2 = slices[csc2], csc2._idx[cs2]
+
+                    if crossdiag.ndim == 1:
+                        Phi[block1, block2][idx1, idx2] += crossdiag
+                        Phi[block2, block1][idx2, idx1] += crossdiag
+                    else:
+                        Phi[block1, block2][np.ix_(idx1, idx2)] += crossdiag
+                        Phi[block2, block1][np.ix_(idx2, idx1)] += crossdiag
 
             return Phi
         else:
@@ -709,7 +825,7 @@ class PTA(object):
         return [p.psrname for p in self._signalcollections]
 
     def _set_signal_dict(self):
-        """Set signal dictionary"""
+        """ Set signal dictionary"""
 
         self._signal_dict = {}
         sig_list = []
@@ -729,7 +845,7 @@ class PTA(object):
 
     @property
     def signals(self):
-        """Return signal dictionary."""
+        """ Return signal dictionary."""
         return self._signal_dict
 
     def get_signal(self, name):
@@ -760,6 +876,9 @@ class PTA(object):
                         cpcount += 1
                 row = [sig.name, sig.__class__.__name__, len(sig.param_names)]
                 summary += "{: <40} {: <30} {: <20}\n".format(*row)
+                if "BasisGP" in sig.__class__.__name__:
+                    summary += "\nBasis shape (Ntoas x N basis functions): {}".format(str(sig.get_basis().shape))
+                    summary += "\nN selected toas: {}\n".format(str(len([i for i in sig._masks[0] if i])))
                 if include_params:
                     summary += "\n"
                     summary += "params:\n"
@@ -801,7 +920,7 @@ def SignalCollection(metasignals):  # noqa: C901
 
         # TODO: this could be implemented more cleanly
         def _set_cache_parameters(self):
-            """Sets the cache for various signal types."""
+            """ Sets the cache for various signal types."""
 
             self.white_params = []
             self.basis_params = []
@@ -964,35 +1083,8 @@ def SignalCollection(metasignals):  # noqa: C901
             for signal in self._signals:
                 if signal in self._idx:
                     Fmat[:, self._idx[signal]] = signal.get_basis(params)
-                    # print(signal.signal_name)
-                    # print(self._idx[signal])
+
             return Fmat
-
-        @cache_call("basis_params", limit=1)
-        def get_Mmat(self, params={}):
-            if self._Fmat is None:
-                return None
-
-            for signal in self._signals:
-                if signal in self._idx:
-                    if signal.signal_name=='linear timing model':
-                        return signal.get_basis(params)
-
-        @cache_call("basis_params", limit=1)
-        def get_Fmat(self, params={}):
-            if self._Fmat is None:
-                return None
-            Fmat = np.zeros_like(self._Fmat)
-
-            for signal in self._signals:
-                if signal in self._idx:
-                    if signal.signal_name!='linear timing model':
-                        Fmat[:, self._idx[signal]] = signal.get_basis(params)
-                    else:
-                        # print(signal.signal_name)
-                        mask = self._idx[signal]
-
-            return np.delete(Fmat,mask,axis=1)
 
         def get_phiinv(self, params):
             return self.get_phi(params).inv()
@@ -1017,8 +1109,6 @@ def SignalCollection(metasignals):  # noqa: C901
                 return None
             Nvec = self.get_ndiag(params)
             res = self.get_detres(params)
-            # print(np.dot(T.T, res/Nvec) - Nvec.solve(res, left_array=T))
-            # return np.dot(T.T, res/Nvec)
             return Nvec.solve(res, left_array=T)
 
         @cache_call(["basis_params", "white_params"])
@@ -1027,8 +1117,6 @@ def SignalCollection(metasignals):  # noqa: C901
             if T is None:
                 return None
             Nvec = self.get_ndiag(params)
-            # print(np.dot(T.T, T/Nvec[:,None]) - Nvec.solve(T, left_array=T))
-            # return np.dot(T.T, T/Nvec[:,None])
             return Nvec.solve(T, left_array=T)
 
         @cache_call(["white_params", "delay_params"])
@@ -1040,69 +1128,6 @@ def SignalCollection(metasignals):  # noqa: C901
         # TO DO: cache how?
         def get_logsignalprior(self, params):
             return sum(signal.get_logsignalprior(params) for signal in self._signals)
-
-        @cache_call(["basis_params","white_params", "delay_params"])
-        def get_dtLdt(self, params):
-            M = self.get_Mmat(params)
-            res = self.get_detres(params)
-            Nvec = self.get_ndiag(params)
-            if M is None:
-                return None
-            M_Nm1_r = Nvec.solve(res, left_array=M)
-            MX = Nvec.solve(M, left_array=M)
-            det_M_Nm1_M = np.linalg.slogdet(MX)
-            MY = M_Nm1_r @ np.linalg.solve(MX,M_Nm1_r)
-            return -MY, det_M_Nm1_M[1]
-        
-
-        @cache_call(["basis_params", "white_params", "delay_params"])
-        def get_FLr(self, params):
-            M = self.get_Mmat(params)
-            F = self.get_Fmat(params)
-            res = self.get_detres(params)
-            Nvec = self.get_ndiag(params)
-            if M is None:
-                return None
-            MX = Nvec.solve(M, left_array=M)
-            M_Nm1_r = Nvec.solve(res, left_array=M)
-            M_Nm1_F = Nvec.solve(F, left_array=M)
-            MY = M_Nm1_F.T @ np.linalg.solve(MX,M_Nm1_r)
-            F_L_dt = Nvec.solve(res, left_array=F) - MY
-            return F_L_dt
-
-        @cache_call(["basis_params", "white_params"])
-        def get_FLF(self, params):
-            M = self.get_Mmat(params)
-            F = self.get_Fmat(params)
-            Nvec = self.get_ndiag(params)
-            if M is None:
-                return None
-            MX = Nvec.solve(M, left_array=M)
-            M_Nm1_F = Nvec.solve(F, left_array=M)
-            MY = M_Nm1_F.T @ np.linalg.solve(MX,M_Nm1_F)
-            FZ = Nvec.solve(F, left_array=F)
-            FLF = FZ - MY
-            return FLF
-
-        @cache_call(["basis_params", "white_params", "delay_params"])
-        def get_FLF_FLr_dtLdt_rNr(self, params):
-            M = self.get_Mmat(params)
-            F = self.get_Fmat(params)
-            res = self.get_detres(params)
-            Nvec = self.get_ndiag(params)
-            if M is None:
-                return None
-            MX = Nvec.solve(M, left_array=M)
-            M_Nm1_r = Nvec.solve(res, left_array=M)
-            M_Nm1_F = Nvec.solve(F, left_array=M)
-            F_L_dt = Nvec.solve(res, left_array=F) - M_Nm1_F.T @ np.linalg.solve(MX,M_Nm1_r)
-            det_M_Nm1_M = np.linalg.slogdet(MX)[1]
-            dt_L_dt = -M_Nm1_r @ np.linalg.solve(MX,M_Nm1_r)
-            rNr = Nvec.solve(res, left_array=res, logdet=True)
-            MY = M_Nm1_F.T @ np.linalg.solve(MX,M_Nm1_F)
-            FZ = Nvec.solve(F, left_array=F)
-            FLF = FZ - MY
-            return FLF, F_L_dt, dt_L_dt + det_M_Nm1_M + rNr[0] + rNr[1]
 
     return SignalCollection
 
@@ -1208,11 +1233,7 @@ class ndarray_alt(np.ndarray):
     """Sub-class of ``np.ndarray`` with custom ``solve`` method."""
 
     def __new__(cls, inputarr):
-        if inputarr.ndim != 1:
-            raise NotImplementedError("ndarray_alt does not support non-diagonal arrays")
-
         obj = np.asarray(inputarr).view(cls)
-
         return obj
 
     def __add__(self, other):
@@ -1409,6 +1430,7 @@ class ShermanMorrison(object):
         return logdet
 
     def solve(self, other, left_array=None, logdet=False):
+
         if other.ndim == 1:
             if left_array is None:
                 ret = self._solve_D1(other)
@@ -1420,7 +1442,7 @@ class ShermanMorrison(object):
                 raise TypeError
         elif other.ndim == 2:
             if left_array is None:
-                raise NotImplementedError("ShermanMorrison does not implement _solve_D2")
+                raise TypeError
             elif left_array is not None and left_array.ndim == 2:
                 ret = self._solve_2D2(other, left_array)
             elif left_array is not None and left_array.ndim == 1:
