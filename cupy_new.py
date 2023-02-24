@@ -1,5 +1,12 @@
 # This script shows how to evaluate the likelihood of a real dataset. This is based on https://github.com/nanograv/12p5yr_stochastic_analysis/blob/master/notebooks/pta_gwb_analysis.ipynb
-import os, glob, json, pickle
+import os
+print("process", os.getpid() )
+dev = 7
+os.system(f"CUDA_VISIBLE_DEVICES={dev}")
+os.environ["CUDA_VISIBLE_DEVICES"] = f"{dev}"
+os.system("echo $CUDA_VISIBLE_DEVICES")
+
+import glob, json, pickle
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy.linalg as sl
@@ -92,7 +99,7 @@ gamma_dm = parameter.Uniform(0, 7)
 
 # GW parameters (initialize with names here to use parameters in common across pulsars)
 log10_A_gw = parameter.Uniform(-18,-14)('log10_A_gw')
-gamma_gw = parameter.Uniform(0,7)('gamma_gw')
+gamma_gw = parameter.Constant(4.33)('gamma_gw')
 
 # white noise
 ef = white_signals.MeasurementNoise(efac=efac, selection=selection)
@@ -107,11 +114,8 @@ rn = gp_signals.FourierBasisGP(spectrum=pl, components=30, Tspan=Tspan)
 # spatial correlations are covered in the hypermodel context later
 orf = utils.hd_orf()
 cpl = utils.powerlaw(log10_A=log10_A_gw, gamma=gamma_gw)
-gw = gp_signals.FourierBasisCommonGP(cpl, orf, components=30, Tspan=Tspan, name='gw')#gp_signals.FourierBasisGP(spectrum=pl, components=30, Tspan=Tspan, name='gw')#
-
-mono = gp_signals.FourierBasisCommonGP(cpl, utils.monopole_orf(),
-                                      components=15, Tspan=Tspan, name='mono')
-
+gw = gp_signals.FourierBasisCommonGP(cpl, orf,
+                                      components=30, Tspan=Tspan, name='gw')
 
 # to add solar system ephemeris modeling...
 bayesephem=False
@@ -123,33 +127,28 @@ tm = gp_signals.TimingModel(use_svd=True)
 
 # full model
 if bayesephem:
-    s = ef + eq + ec + rn + tm + eph + gw # + mono
-    # additional
+    s = ef + eq + ec + rn + tm + eph + gw
     rn_s = ef + eq + ec + rn + eph + gw # + mono
-    gwonly = ef + eq + ec + eph + gw # + mono
+
 else:
-    s = ef + eq + ec + rn + tm + gw # + mono
-    # additional
+    s = ef + eq + ec + rn + tm + gw
     rn_s = ef + eq + ec + rn + gw # + mono
-    gwonly = ef + eq + ec + gw # + mono
+
 
 # intialize PTA (this cell will take a minute or two to run)
 models = []
 models_gw = []
-models_gwonly = []
 for p in psrs:    
     models.append(s(p))
     models_gw.append(rn_s(p))
-    models_gwonly.append(gwonly(p))
-
+    
 pta = signal_base.PTA(models)
 pta_gw = signal_base.PTA(models_gw)
-pta_gwonly = signal_base.PTA(models_gwonly)
 
 # set white noise parameters with dictionary
 pta.set_default_params(params)
 pta_gw.set_default_params(params)
-pta_gwonly.set_default_params(params)
+
 ##############################################################################################
 # Here we calculate the likelihood
 np.random.seed(42)
@@ -158,20 +157,27 @@ np.random.seed(42)
 num = 10
 x0 = [np.hstack([p.sample() for p in pta.params]) for i in range(num)]
 
-# evaluate likelihood, I also print the values to check they are not infinite
 pta.get_lnlikelihood(x0[0])
+# evaluate likelihood, I also print the values to check they are not infinite
 print("start timing")
 tic = time.perf_counter()
-old = np.asarray([pta.get_lnlikelihood(xx) for xx in x0])
+print([pta.get_lnlikelihood(xx) for xx in x0])
 toc = time.perf_counter()
 print("the likelihood evaluation took: ",(toc-tic)/num, "seconds, number of pulsars", len(psrs))
-print(old)
+old = np.asarray([pta.get_lnlikelihood(xx) for xx in x0])
+# [4889283.07254719, 4889034.559904126, 4889407.334921482, 4889648.942572773, 4889598.006757148, 4885220.336421929, 4889456.655002594, 4889341.636542754, 4889584.523673296, 4886285.761601714]
 #######################################################################################
 # Here we break down the timing into different pieces
+# phi_0 = rn(psrs[0]).get_phi(x0[0]) + gw(psrs[0]).get_phi(x0[0])
+# B = tm(psrs[0]).get_phi(x0[0])
+# Mmat = tm(psrs[0]).get_basis(x0[0])
+# F = rn(psrs[0]).get_basis(x0[0])
+import cupy as xp
+
 import scipy.sparse as sps
+from cupyx.scipy.linalg import block_diag, solve_triangular
 from enterprise.signals.signal_base import simplememobyid
 from sksparse.cholmod import cholesky, CholmodError
-
 
 class LogLikelihoodLocal(object):
     def __init__(self, pta, cholesky_sparse=True):
@@ -184,18 +190,19 @@ class LogLikelihoodLocal(object):
             return sps.block_diag(TNTs, "csc")
         else:
             return sl.block_diag(*TNTs)
-
+    
     @simplememobyid
     def _block_TNr(self, TNrs):
-        return np.concatenate(TNrs)
+        return xp.concatenate((xp.asarray(el) for el in TNrs))
 
     def __call__(self, xs, phiinv_method="cliques"):
-        
         # map parameter vector if needed
         params = xs if isinstance(xs, dict) else self.pta.map_params(xs)
 
         loglike = 0
 
+        # phiinvs will be a list or may be a big matrix if spatially
+        # correlated signals
         tic = time.time()
         flf_flr_rLr = self.pta.get_FLF_FLr_dtLdt_rNr(params)
         TNTs = [ell[0] for ell in flf_flr_rLr]
@@ -205,60 +212,47 @@ class LogLikelihoodLocal(object):
         toc = time.time()
         print("TNrs TNTs", toc - tic)
         tic = time.time()
-        # this function makes sure that we can get directly a sparse matrix
-        phiinvs = pta_gw.get_phiinv_byfreq_cliques(params, logdet=True, chol=True)#, phi_input=totPhi, chol=True)
-        # phi_test = pta_gw.get_phi(params, cliques=True, chol=True)
-        # Nf = len(TNTs[0])
-        # Npsr = len(TNTs)
-        # out = np.linalg.inv([phi_test[slice(i, Npsr*Nf, Nf), slice(i, Npsr*Nf, Nf)].toarray() for i in range(Nf)])
-        # logdet_phi = np.sum( np.linalg.slogdet([phi_test[slice(i, Npsr*Nf, Nf), slice(i, Npsr*Nf, Nf)].toarray() for i in range(Nf)])[1] )
+        Nf = len(TNTs[0])
+        Npsr = len(TNTs)
+        phiinvs = pta_gw.get_phiinv_byfreq_cliques_gpu(params, logdet=True, chol=False, slicing=1)
         toc = time.time()
         print("phi inv", toc - tic)
-        # newinv = sps.bmat([[ sps.diags(out[:,A,B],format="csc") for A in range(Npsr)]for B in range(Npsr)],format="csc")
-        
+        # breakpoint()
+        # phiinvs = pta_gw.get_phiinv_byfreq_cliques_gpu(params, logdet=True, chol=False, slicing=None)
+
         # get extra prior/likelihoods
         loglike += sum(self.pta.get_logsignalprior(params))
+        
 
         # red noise piece
         if self.pta._commonsignals:
             tic = time.time()
-            phiinv, logdet_phi = phiinvs #  newinv, np.sum(out_ld[1])#
+            phiinv, logdet_phi = phiinvs
 
-            TNT = self._block_TNT(TNTs)
-            TNr = self._block_TNr(TNrs)
-
-            # logdet_phi = 0.0
-            # for i in range(Nf):
-            #     # current_cf = cholesky(phi_test[slice(i, Npsr*Nf, Nf), slice(i, Npsr*Nf, Nf)])
-            #     # logdet_phi += current_cf.logdet()
-            #     TNT[slice(i, Npsr*Nf, Nf), slice(i, Npsr*Nf, Nf)] += sps.csc_matrix(out[i])
-
+            TNT = block_diag(*(xp.asarray(el) for el in TNTs))
             toc = time.time()
-            print("prepare to cholesky", toc-tic)
+            print("prepare to cholesky TNT", toc-tic)
+            tic = time.time()
+            TNr = self._block_TNr(TNrs)
+            toc = time.time()
+            print("prepare to cholesky TNr", toc-tic)
+            tic = time.time()
+            Mat = TNT + phiinv
+            toc = time.time()
 
+            print("prepare to cholesky", toc-tic)
             if self.cholesky_sparse:
                 try:
-                    # breakpoint() 
                     tic = time.time()
-                    # ------------------------------------------
-                    # tmp_phi = pta_gw.get_phi(params, chol=True, cliques=True)
-                    # U,S,V =  sps.linalg.svds(tmp_phi,k=100)
-                    # tmp_Sigma = U.T @ TNT @ U+ np.diag(1/S)
-                    # right = U.T @ TNr
-                    # res = right @ np.linalg.solve(tmp_Sigma, right)
-                    # expval = tmp_cf(b_vec)
-                    # logdet_sigma = tmp_cf.logdet()
-                    # ------------------------------------------
-                    
-                    # plt.figure(); plt.imshow((tmp_Sigma.toarray()!=0.0)*1.0);plt.colorbar(); plt.savefig("matrix.pdf");
-                    Sigma = TNT + phiinv
-                    cf = cholesky(Sigma, ordering_method='natural', mode='supernodal') #,'natural','amd','colamd' use_long=False)  # cf(Sigma)
-                    expval = cf(TNr)
-                    logdet_sigma = cf.logdet()
-                    
+                    expval = xp.linalg.solve(Mat, TNr)
+                    logdet_sigma = xp.linalg.slogdet(Mat)[1]
+                    # del Mat
+                    # del TNT
+                    # del phiinv
+                    # del phiinvs
+
                     toc = time.time()
                     print("do cholesky", toc-tic)
-
                 except CholmodError:  # pragma: no cover
                     return -np.inf
             else:
@@ -269,40 +263,27 @@ class LogLikelihoodLocal(object):
                 except sl.LinAlgError:  # pragma: no cover
                     return -np.inf
 
-            # tic = time.time()
+            tic = time.time()
             loglike += -0.5 * (-np.dot(TNr, expval) + logdet_sigma + logdet_phi)
-            # loglike += -0.5 * (-total + logdet_sigma + logdet_phi)
-            # loglike += 0.5 * (np.dot(TNr, expval) - logdet_sigma - logdet_phi)
-            # toc = time.time()
-            # print("final computation", toc-tic)
+            toc = time.time()
+            print("final computation", toc-tic)
         else:
-            list_TNr = np.asarray([TNr for TNr, TNT, pl in zip(TNrs, TNTs, phiinvs) if TNr is not None])
-            list_TNT = [TNT + np.diag(pl[0]) if pl[0].ndim == 1 else TNr + pl[0] for TNr, TNT, pl in zip(TNrs, TNTs, phiinvs) if TNr is not None]
-            logdet_phi = np.sum([pl[1] for TNr, TNT, pl in zip(TNrs, TNTs, phiinvs) if TNr is not None])
-            try:
-                list_cf = np.linalg.cholesky(list_TNT)
-            except np.LinAlgError:  # pragma: no cover
-                return -np.inf
-            list_expval = np.asarray([sl.cho_solve((cf,1), tnr) for cf,tnr in zip(list_cf,list_TNr)])
-            logdet_sigma = np.sum([np.sum(2*np.log(np.diag(cf))) for cf in list_cf])
-            loglike += 0.5 * (np.tensordot(list_TNr, list_expval) - logdet_sigma - logdet_phi)
+            for TNr, TNT, pl in zip(TNrs, TNTs, phiinvs):
+                if TNr is None:
+                    continue
 
-            # for TNr, TNT, pl in zip(TNrs, TNTs, phiinvs):
-            #     if TNr is None:
-            #         continue
+                phiinv, logdet_phi = pl
+                Sigma = TNT + (np.diag(phiinv) if phiinv.ndim == 1 else phiinv)
 
-            #     phiinv, logdet_phi = pl
-            #     Sigma = TNT + (np.diag(phiinv) if phiinv.ndim == 1 else phiinv)
+                try:
+                    cf = sl.cho_factor(Sigma)
+                    expval = sl.cho_solve(cf, TNr)
+                except sl.LinAlgError:  # pragma: no cover
+                    return -np.inf
 
-            #     try:
-            #         cf = sl.cho_factor(Sigma)
-            #         expval = sl.cho_solve(cf, TNr)
-            #     except sl.LinAlgError:  # pragma: no cover
-            #         return -np.inf
+                logdet_sigma = np.sum(2 * np.log(np.diag(cf[0])))
 
-            #     logdet_sigma = np.sum(2 * np.log(np.diag(cf[0])))
-
-            #     loglike += 0.5 * (np.dot(TNr, expval) - logdet_sigma - logdet_phi)
+                loglike += 0.5 * (np.dot(TNr, expval) - logdet_sigma - logdet_phi)
 
         return loglike
 
@@ -311,7 +292,7 @@ loglike = LogLikelihoodLocal(pta)
 loglike(x0[0])
 print("start timing")
 tic = time.perf_counter()
-new = np.asarray([loglike(xx) for xx in x0])
+new = np.asarray([loglike(xx).get() for xx in x0])
 toc = time.perf_counter()
 print("the likelihood evaluation took: ",(toc-tic)/num, "seconds, number of pulsars", len(psrs))
 
@@ -320,63 +301,92 @@ print(new)
 #######################################################################################
 # my output on my local laptop
 """
-Warning: cannot find astropy, units support will not be available.
+process 2639586
+7
+WARNING: AstropyDeprecationWarning: The private astropy._erfa module has been made into its own package, pyerfa, which is a dependency of astropy and can be imported directly using "import erfa" [astropy._erfa]
 ./data
 start timing
-the likelihood evaluation took:  1.042802065995056 seconds, number of pulsars 45
-[4889295.72096164 4890056.75696705 4888988.8938273  4890264.72967445
- 4885223.25900668 4889360.264271   4887021.76278452 4889557.13940805
- 4885691.37956126 4885274.16671721]
-TNrs TNTs 5.060437917709351
-phi inv 1.4396321773529053
-prepare to cholesky 0.0049021244049072266
-do cholesky 0.09654688835144043
-start timing
-TNrs TNTs 0.00033402442932128906
-phi inv 0.10812687873840332
-prepare to cholesky 2.3126602172851562e-05
-do cholesky 0.047144174575805664
-TNrs TNTs 0.0003132820129394531
-phi inv 0.12313294410705566
-prepare to cholesky 2.5987625122070312e-05
-do cholesky 0.051357269287109375
-TNrs TNTs 0.0003132820129394531
-phi inv 0.12040185928344727
-prepare to cholesky 2.5272369384765625e-05
-do cholesky 0.055702924728393555
-TNrs TNTs 0.0003211498260498047
-phi inv 0.12212800979614258
-prepare to cholesky 2.7179718017578125e-05
-do cholesky 0.050769805908203125
-TNrs TNTs 0.00032591819763183594
-phi inv 0.11456084251403809
-prepare to cholesky 2.47955322265625e-05
-do cholesky 0.0482180118560791
-TNrs TNTs 0.0003008842468261719
-phi inv 0.10904192924499512
-prepare to cholesky 2.5033950805664062e-05
-do cholesky 0.05283617973327637
-TNrs TNTs 0.00038504600524902344
-phi inv 0.1189870834350586
-prepare to cholesky 3.0994415283203125e-05
-do cholesky 0.05112099647521973
-TNrs TNTs 0.0003540515899658203
-phi inv 0.12469768524169922
-prepare to cholesky 2.7179718017578125e-05
-do cholesky 0.05182981491088867
-TNrs TNTs 0.00030422210693359375
-phi inv 0.11590909957885742
-prepare to cholesky 2.5987625122070312e-05
-do cholesky 0.0479738712310791
-TNrs TNTs 0.0003299713134765625
-phi inv 0.12515878677368164
-prepare to cholesky 2.574920654296875e-05
-do cholesky 0.047463178634643555
-the likelihood evaluation took:  0.17507433079881593 seconds, number of pulsars 45
-difference old likelihood [246652.91516194 246652.91516158 246652.91516406 246652.91516155
- 246652.91516153 246652.91512186 246652.91516153 246652.91516144
- 246652.91515535 246652.91516137] proporional to ln(1e40)
-[5135948.63612358 5136709.67212863 5135641.80899136 5136917.644836
- 5131876.17416821 5136013.17939286 5133674.67794605 5136210.05456949
- 5132344.29471661 5131927.08187857]
+[4889283.07254719, 4889034.559904126, 4889407.334921482, 4889648.942572773, 4889598.006757148, 4885220.336421929, 4889456.655002594, 4889341.636542754, 4889584.523673296, 4886285.761601714]
+the likelihood evaluation took:  0.9183207261841744 seconds, number of pulsars 45
+TNr time 0.0001876354217529297
+TNT time 2.384185791015625e-07
+phinv time 0.14556503295898438
+prepare to cholesky TNT 0.44813990592956543
+prepare to cholesky TNr 0.0019795894622802734
+prepare to cholesky 0.2215714454650879
+do cholesky 0.8677828311920166
+final computation 0.002911806106567383
+TNr time 0.00016546249389648438
+TNT time 0.0
+phinv time 0.11804413795471191
+prepare to cholesky TNT 0.005855083465576172
+prepare to cholesky TNr 1.9073486328125e-05
+prepare to cholesky 0.054804325103759766
+do cholesky 0.21613550186157227
+final computation 0.0062143802642822266
+TNr time 0.0001881122589111328
+TNT time 0.0
+phinv time 0.12381792068481445
+prepare to cholesky TNT 0.002818584442138672
+prepare to cholesky TNr 1.8358230590820312e-05
+prepare to cholesky 0.05485987663269043
+do cholesky 0.21767568588256836
+final computation 0.0063359737396240234
+TNr time 0.0001919269561767578
+TNT time 4.76837158203125e-07
+phinv time 0.1252593994140625
+prepare to cholesky TNT 0.0050487518310546875
+prepare to cholesky TNr 2.765655517578125e-05
+prepare to cholesky 0.059271812438964844
+do cholesky 0.21337008476257324
+final computation 0.006444215774536133
+TNr time 0.00021028518676757812
+TNT time 4.76837158203125e-07
+phinv time 0.12296390533447266
+prepare to cholesky TNT 0.004899024963378906
+prepare to cholesky TNr 1.9550323486328125e-05
+prepare to cholesky 0.05567741394042969
+do cholesky 0.21509075164794922
+final computation 0.00635528564453125
+TNr time 0.0001919269561767578
+TNT time 4.76837158203125e-07
+phinv time 0.12423062324523926
+prepare to cholesky TNT 0.003528118133544922
+prepare to cholesky TNr 2.574920654296875e-05
+prepare to cholesky 0.055269479751586914
+do cholesky 0.21542811393737793
+final computation 0.006351947784423828
+TNr time 0.00019478797912597656
+TNT time 2.384185791015625e-07
+phinv time 0.12387299537658691
+prepare to cholesky TNT 0.0027484893798828125
+prepare to cholesky TNr 1.9073486328125e-05
+prepare to cholesky 0.058077096939086914
+do cholesky 0.2170252799987793
+final computation 0.00634312629699707
+TNr time 0.0001976490020751953
+TNT time 0.0
+phinv time 0.12353944778442383
+prepare to cholesky TNT 0.0033125877380371094
+prepare to cholesky TNr 2.384185791015625e-05
+prepare to cholesky 0.055011749267578125
+do cholesky 0.21822047233581543
+final computation 0.006391286849975586
+TNr time 0.0002067089080810547
+TNT time 2.384185791015625e-07
+phinv time 0.12412118911743164
+prepare to cholesky TNT 0.0027289390563964844
+prepare to cholesky TNr 2.0265579223632812e-05
+prepare to cholesky 0.054795026779174805
+do cholesky 0.21411681175231934
+final computation 0.006306886672973633
+TNr time 0.0002028942108154297
+TNT time 2.384185791015625e-07
+phinv time 0.12160968780517578
+prepare to cholesky TNT 0.003488302230834961
+prepare to cholesky TNr 2.2649765014648438e-05
+prepare to cholesky 0.05472540855407715
+do cholesky 0.21706438064575195
+final computation 0.006464958190917969
+[array(4889283.07254556), array(4889034.55990401), array(4889407.33493626), array(4889648.94257218), array(4889598.00675683), array(4885220.33641609), array(4889456.65500225), array(4889341.6365405), array(4889584.52366823), array(4886285.76160171)]
 """

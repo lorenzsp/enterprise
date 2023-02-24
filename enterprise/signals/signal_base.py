@@ -18,6 +18,13 @@ try:
 except:
     from collections import Sequence
 
+try:
+    from cupyx.scipy.linalg import block_diag, solve_triangular
+    import cupy as xp
+    use_gpu=True
+except:
+    import numpy as xp
+
 import itertools
 import logging
 
@@ -688,6 +695,59 @@ class PTA(object):
 
             return (phi, ld) if logdet else phi
 
+
+    def get_phiinv_byfreq_cliques_gpu(self, params, logdet=False, chol=False, phi_input=None,slicing=None):
+        phi = self.get_phi_gpu(params, cliques=True, chol=False)
+
+        if isinstance(phi, list):
+            return [None if phivec is None else phivec.inv(logdet) for phivec in phi]
+        else:
+            ld = 0
+
+            
+            if slicing is not None:
+
+                ind_inphi = [xp.ix_(self._cliques == clcount, self._cliques == clcount)  for clcount in range(self._clcount) if np.any(self._cliques == clcount)]
+                Mat = xp.asarray([ phi[el] for el in ind_inphi ])
+                invMat = xp.linalg.inv(Mat)
+                for i,el in enumerate(ind_inphi):
+                    phi[el] = invMat[i].copy()
+                ld += xp.sum(xp.linalg.slogdet(Mat)[1])
+
+                # then do the pure diagonal terms
+                idx = self._cliques == -1
+                if np.any(idx):
+                    if logdet:
+                        ld += xp.sum(xp.log(phi[idx, idx]))
+
+                    phi[idx, idx] = 1.0 / phi[idx, idx]
+            
+            # first invert all the cliques
+            else:
+                for clcount in range(self._clcount):
+                    idx = self._cliques == clcount
+
+                    if np.any(idx):
+                        idx2 = xp.ix_(idx, idx)
+
+                        phi2 = phi[idx2]
+
+                        if logdet:
+                            ld += xp.linalg.slogdet(phi2)[1]
+
+                        phi[idx2] = xp.linalg.inv(phi2)
+
+                # then do the pure diagonal terms
+                idx = self._cliques == -1
+                if np.any(idx):
+                    if logdet:
+                        ld += xp.sum(xp.log(phi[idx, idx]))
+
+                    phi[idx, idx] = 1.0 / phi[idx, idx]
+
+            return (phi, ld) if logdet else phi
+
+
     # we use "cliques" to account for sparse non-diagonal Phi matrices
     # for each value in self._cliques, the matrix indices with that value form
     # an independent submatrix that can be inverted separately
@@ -804,6 +864,55 @@ class PTA(object):
             return Phi
         else:
             return phis
+
+
+    def get_phi_gpu(self, params, cliques=False, chol=False):
+        phis = [signalcollection.get_phi(params) for signalcollection in self._signalcollections]
+
+        # if we found common signals, we'll return a big phivec matrix,
+        # otherwise a list of phivec vectors (some of which possibly None)
+        if self._commonsignals:
+            if np.any([phi.ndim == 2 for phi in phis if phi is not None]):
+                # if we have any dense matrices,
+                Phi = sl.block_diag(*[np.diag(phi) if phi.ndim == 1 else phi for phi in phis if phi is not None])
+            else:
+                Phi = xp.diag(xp.concatenate([xp.asarray(phi) for phi in phis if phi is not None]))
+
+            # get a dictionary of slices locating each pulsar in Phi matrix
+            slices = self._get_slices(phis)
+
+            # self._cliques is a vector of the same size as the Phi matrix
+            # for each Phi index i, self._cliques[i] is -1 if row/column
+            # belong to no clique, or it gives the clique number otherwise
+            if cliques:
+                self._resetcliques(Phi.shape[0])
+                self._setpulsarcliques(slices, phis)
+
+            # iterate over all common signal classes
+            for csclass, csdict in self._commonsignals.items():
+                # first figure out which indices are used in this common signal
+                # and update the clique index
+                if cliques:
+                    self._setcliques(slices, csdict)
+            
+                list_sig = [el[0] for el in csdict.items()]
+                base_phi = xp.zeros_like(phis[0])
+                rho_1psr = xp.asarray(csclass._prior(list_sig[0]._labels, params=params))
+                base_phi[:len(rho_1psr)] += rho_1psr
+                Gamma = xp.asarray([[csclass._orf(ls1._psrpos,ls2._psrpos) for ls1 in list_sig] for ls2 in list_sig])
+                Gamma[range(len(Gamma)),range(len(Gamma))] = 0.0
+                # Npsr = len(phis)
+                # Gamma = xp.zeros((Npsr,Npsr) )
+                # Gamma[xp.triu_indices(Npsr,k=1)] += xp.asarray([csclass._orf(list_sig[i]._psrpos, list_sig[j]._psrpos) for i in range(Npsr) for j in range(Npsr) if j>i])
+                # Gamma += Gamma.T
+                
+                Phi += xp.kron(Gamma, xp.diag(base_phi))
+
+            return Phi
+        else:
+            return phis
+
+
 
     def map_params(self, xs):
         ret = {}
